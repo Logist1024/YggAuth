@@ -33,7 +33,7 @@ YggAuth 是一套**全局统一账号系统**:用一份账号与登录能力,同
 
 盘查旧库表结构时发现三处逻辑不合理:
 
-1. **两套并行 RBAC**:`admin_role` / `admin_permission_point`(后台权限)与 `mc_role` / `oauth_role`(域内角色)是两套完全独立的表,权限点命名空间也不同(`admin:mc:profile:read` vs `mc:profile:read`)。职责边界从未被清晰定义,两套体系都需要维护。
+1. **两套并行 RBAC**:`admin_role` / `admin_permission_point`(后台权限)与 `mc_role` / `oauth_role`(域内角色)是两套完全独立的表,权限点命名空间也不同(`admin:mc:profile:read` vs `minecraft:profile:read`)。职责边界从未被清晰定义,两套体系都需要维护。
 2. **`organization` 表是空壳**:建了带 `parent_id` 的树形组织表,但所有角色都挂在 account 上,没有任何代码消费这张表。真实需求不明。
 3. **密码上限 18 位**:`PASSWORD_MAX_LENGTH=18` 偏短,不符合现代实践,疑似随手填写而非安全决策。
 
@@ -111,7 +111,7 @@ YggAuth 是一套**全局统一账号系统**:用一份账号与登录能力,同
 | 业务域 (OIDC 域) | 为业务系统提供 OAuth 2.1 / OIDC 授权服务 |
 | 游戏域 (MC 域) | 为 Minecraft 提供 Yggdrasil 认证 + 皮肤站 |
 | SSO | 静默发码登录,用户在已登录状态下免密跳转 |
-| 权限点 (permission) | 形如 `mc:profile:read` 的原子操作标识 |
+| 权限点 (permission) | 形如 `minecraft:profile:read` 的原子操作标识 |
 | 角色 (role) | 权限点的集合,可授予账号 |
 | 皮肤 (skin) | Minecraft 玩家角色皮肤 PNG |
 | 披风 (cape) | Minecraft 玩家披风 PNG |

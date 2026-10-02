@@ -19,7 +19,8 @@ linters:
     - errorlint      # 错误比较要用 errors.Is
     - nilerr         # return nil 前忽略了 err
     - copyloopvar    # Go 1.22+ 循环变量捕获
-    - godot          # 注释句末要有标点
+    # 说明:没有启用 godot —— 它的规则是「注释句末必须是半角句号」,
+    # 与本项目中文注释风格冲突,强行启用只会催生无意义的标点。
   settings:
     revive:
       rules:
@@ -56,9 +57,6 @@ issues:
   max-issues-per-linter: 0
   max-same-issues: 0
   exclude-rules:
-    # godot:中文注释允许以中文句号结尾,不强制半角标点
-    - linters: [godot]
-      source: "^//.*[^。.:;!?]$"
     # handler 里未使用参数很常见,单独放宽
     - linters: [revive]
       text: "unused-parameter"

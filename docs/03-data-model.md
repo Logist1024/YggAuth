@@ -423,3 +423,69 @@ SELECT * FROM identity.account WHERE lower(email) = lower($1);
 
 **上一篇**:[02-architecture.md](./02-architecture.md) —— 架构设计
 **下一篇**:[04-decisions.md](./04-decisions.md) —— 关键决策记录
+
+---
+
+## 九、实施补充(M1 落地时的 schema 调整)
+
+> 本节记录 M1 写迁移时对前八节设计的**增量调整**。
+> 迁移一旦合入即不可修改(见第七节「只向前」),所以这里把实际形态固定下来。
+> 调整原因统一是:fosite 的会话持久化、Yggdrasil 协议的安全要求需要额外的列或表。
+
+### 9.1 identity 调整
+
+| 调整 | 内容 | 原因 |
+|---|---|---|
+| `account.email` | 去掉列级 `UNIQUE`,改为唯一索引 `idx_account_email_lower ON (lower(email))` | 邮箱大小写不敏感唯一,列级 UNIQUE 做不到 |
+| `account` 新增 | `email_verified_at TIMESTAMPTZ` | 原设计在 `identity.token` 一节提到验证状态,但表里没有承载字段 |
+| `account.status` 默认值 | `pending_verification` | 与「注册后需验证邮箱才能用」的实际流程一致 |
+| `credential.params` 默认值 | `'{}'::jsonb` | 避免插入时必填 |
+| `session` 新增 | `revoke_reason TEXT` | 区分「主动登出 / 改密码吊销 / 管理员踢下线」,便于审计追溯 |
+| `session` 新增 | `idx_session_sso` | 全局登出按 `sso_session_id` 批量吊销 |
+| `email_token` 新增 | `idx_email_token_expires` | 后台定期清理过期令牌 |
+| `invitation` 新增 | `max_uses > 0`、`used_count >= 0` 的 CHECK | 防止负数或零次邀请码被写进来 |
+| `audit_event` 新增 | `idx_audit_target` | 后台按对象维度检索(哪个客户端、哪张材质) |
+
+另外新增 `ygg_touch_updated_at()` 触发器函数,所有带 `updated_at` 的表共用。
+
+### 9.2 oidc 调整:为 fosite 持久化会话
+
+fosite 的令牌不是一个字符串,而是「签名 + 会话数据 + 原始请求」三件套。
+换令牌阶段要完整还原这些信息,因此三张令牌表各增加三列:
+
+```sql
+signature      BYTEA NOT NULL UNIQUE,  -- fosite 用来按请求参数反查会话
+session        JSONB NOT NULL,         -- 序列化后的 fosite.Session
+request        JSONB NOT NULL,         -- 序列化后的原始 fosite.Request
+```
+
+- `oidc.access_token.account_id` 改为**可空**:`client_credentials` 流程没有用户主体。
+- `oidc.refresh_token` 与 `oidc.access_token` 增加 `revoked_reason`,记录吊销原因。
+- `oidc.consent` 增加 `session_id` 与 `session JSONB`:同意记录要能还原 OIDC 会话,
+  否则 userinfo / id_token 拿不到 claims。
+
+### 9.3 oidc 新增表
+
+| 表 | 用途 |
+|---|---|
+| `oidc.pushed_authorization_request` | RFC 9126 推送授权请求。`request_uri_hash` 唯一,带 `expires_at` 与 `used_at` |
+| `oidc.device_code` | RFC 8628 设备码流程。`user_code_hash` 单独建唯一索引,与 `device_code_hash` 区分 |
+
+### 9.4 minecraft 调整与新增
+
+| 调整 | 内容 | 原因 |
+|---|---|---|
+| `name_history` 新增 | `reusable_at TIMESTAMPTZ` | 替代第三节「待定事项 1」。旧名默认保留 `MC_NAME_RETENTION_DAYS` 天,期间禁止他人注册;`NULL` 表示永久保留 |
+| `profile` 新增 | `idx_profile_name_lower` | 按名查档案走 `current_name`,MC 协议传的是原样大小写 |
+| `access_token` 新增 | `revoked_reason` | 区分「主动登出 / 刷新轮换 / 管理员吊销」 |
+| **新增** `minecraft.server` | 登记在册的 MC 服务器:`server_id` + `shared_secret` + 启用开关 | 「离线服务器绕过」的防线。`hasJoined` 只认登记过的 serverId,未登记一律 204 |
+| **新增** `minecraft.signing_key` | MC 域独立签名密钥,`kid` 前缀 `mc-` | 第五节「隔离性要求」里提到过但前面章节没定义表 |
+| **新增** `minecraft.external_binding` | 外部皮肤站绑定 + base_url | 4.5 的外部回源需要持久化绑定关系。`base_url` 只允许后台配置,不是用户输入(防 SSRF) |
+| `texture` 新增 | `last_used_at`、`idx_texture_refcount` | 引用计数回收需要判断「ref_count 归零且长期未访问」 |
+
+`server_session` 增加 `verified_at`:同一 serverId 只允许 `hasJoined` 成功一次(防重放)。
+
+### 9.5 app 调整
+
+`app.setting` 预置 11 条默认值(注册模式、密码长度、会话时长、邮件节流、改名保留期等),
+与迁移种子一致,启动后由后台接管。

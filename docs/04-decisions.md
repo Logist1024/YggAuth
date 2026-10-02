@@ -80,7 +80,7 @@
 
 **理由**:
 - 旧版两套并行 RBAC 从未定义清楚职责边界,且需要双份维护;
-- 权限点命名空间重复(`admin:mc:profile:read` 与 `mc:profile:read` 语义重叠);
+- 权限点命名空间重复(`admin:mc:profile:read` 与 `minecraft:profile:read` 语义重叠);
 - 「域管理员」与「平台管理员」的差异本质是**持有的权限点不同**,不是模型不同。
 
 **行为变更**:后台接口的权限点名称改变,详见 [05-api.md](./05-api.md)。

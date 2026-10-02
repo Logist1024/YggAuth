@@ -1,39 +1,147 @@
 // Package transport 负责 HTTP 路由装配。
 //
-// 这里是唯一知道「有哪些业务域」的地方(ADR-011):三个域在 main.go 里
+// 这里是唯一知道「有哪些业务域」的地方(ADR-011):三个域在 cmd/yggauth 里
 // 被显式 import 并注入,少一个域编译就过不了,不需要运行期注册与校验。
 package transport
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/yggauth/yggauth/internal/config"
+	"github.com/yggauth/yggauth/internal/platform/db"
 	"github.com/yggauth/yggauth/internal/platform/health"
+	"github.com/yggauth/yggauth/internal/platform/httpx"
+	"github.com/yggauth/yggauth/internal/platform/metrics"
 )
 
-// Router 汇总所有需要挂载的处理器。
+// Deps 是路由装配所需的依赖。
 //
-// M0 阶段只有健康检查;后续里程碑在这里逐个挂载 identity / oidc /
-// minecraft / admin 四个域的路由。
+// 业务域在后续里程碑注入,字段保持显式,避免用容器隐式装配
+// (docs/02-architecture.md 第二节)。
+type Deps struct {
+	Config *config.Config
+	Logger Logger
+	DB     *db.Pool
+	Clock  Clock
+
+	// 以下字段由各业务域在对应里程碑填充。
+	Identity IdentityDeps
+	OIDC     OIDCDeps
+	MC       MCDeps
+	Admin    AdminDeps
+}
+
+// Logger 是结构化日志器的最小接口,避免 transport 直接依赖 slog 具体类型。
+type Logger interface {
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}
+
+// Clock 是时间抽象的最小接口。
+type Clock interface {
+	Now() time.Time
+}
+
+// Router 组装最终 http.Handler。
 type Router struct {
+	deps   Deps
 	health *health.Handler
 }
 
-// NewRouter 创建路由容器。
-func NewRouter(h *health.Handler) *Router {
-	return &Router{health: h}
+// New 装配路由。
+func New(deps Deps) *Router {
+	var checkers []health.Checker
+	if deps.DB != nil {
+		checkers = append(checkers, health.CheckerFunc{
+			DependencyName: "postgres",
+			CheckFunc:      db.Check(deps.DB),
+		})
+	}
+
+	return &Router{
+		deps:   deps,
+		health: health.NewHandler(checkers, 3*time.Second),
+	}
 }
 
 // Handler 产出最终 http.Handler。
 func (rt *Router) Handler() http.Handler {
 	r := chi.NewRouter()
-	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, `{"code":10001,"message":"资源不存在","data":null}`,
-			http.StatusNotFound)
+
+	// RequestID 放最前面:Recover 打日志时要能拿到 request_id
+	r.Use(httpx.RequestIDMiddleware)
+	r.Use(httpx.RecoverMiddleware)
+	r.Use(func(next http.Handler) http.Handler {
+		return httpx.LoggerMiddleware(httpx.LoggerConfig{
+			TrustProxyHeaders: rt.deps.Config.App.TrustProxyHeaders,
+			SlowThreshold:     rt.deps.Config.Log.SlowRequestThreshold,
+		}, next)
 	})
-	if rt.health != nil {
-		rt.health.Mount(r)
-	}
+	r.Use(httpx.SecurityHeadersMiddleware)
+	r.Use(httpx.CORS(httpx.CORSConfig{
+		AllowedOrigins:   rt.deps.Config.OIDC.AllowedOrigins,
+		AllowCredentials: true,
+	}))
+	r.Use(metricsMiddleware)
+
+	r.NotFound(httpx.NotFound)
+	r.MethodNotAllowed(httpx.MethodNotAllowed)
+
+	rt.health.Mount(r)
+	r.Handle("GET /metrics", metrics.Handler())
+
+	// 业务路由在对应里程碑挂载:
+	//   M2 → /api/auth/*、/api/account/*
+	//   M3 → /oauth/*、/api/sso/*
+	//   M4 → /mc/*
+	//   M5 → /api/account/mc/*
+	//   M6 → 前端 SPA
+
 	return r
+}
+
+// metricsMiddleware 把 HTTP 指标接进 Prometheus。
+func metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// /metrics 自身不统计,否则抓取会自我放大
+		if r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		start := time.Now()
+		next.ServeHTTP(rec, r)
+		metrics.ObserveHTTP(httpx.RoutePattern(r), r.Method, rec.status, time.Since(start))
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if !s.wroteHeader {
+		s.status = code
+		s.wroteHeader = true
+		s.ResponseWriter.WriteHeader(code)
+	}
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	s.wroteHeader = true
+	n, err := s.ResponseWriter.Write(b)
+	return n, err
+}
+
+// Flush 实现 http.Flusher,保证流式响应不被缓冲。
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }

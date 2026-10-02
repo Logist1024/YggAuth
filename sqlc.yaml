@@ -1,0 +1,31 @@
+# sqlc 配置(ADR-009)
+#
+# 原则:SQL 显式写、可读、可审。生成物提交到仓库,
+# CI 用 `make sqlc-diff` 校验生成物与 db/queries 定义一致。
+# 禁止在 Go 代码里拼 SQL 字符串。
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "db/migrations"
+    queries: "db/queries"
+    gen:
+      go:
+        package: "query"
+        out: "internal/platform/db/query"
+        sql_package: "pgx/v5"
+        emit_interface: true
+        emit_empty_slices: true
+        emit_json_tags: true
+        emit_result_struct_pointers: true
+        emit_params_struct_pointers: false
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+          - db_type: "inet"
+            go_type: "net/netip.Addr"
+          - db_type: "interval"
+            go_type:
+              type: "time.Duration"
+              pointer: true

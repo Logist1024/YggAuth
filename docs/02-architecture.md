@@ -105,7 +105,7 @@ admin_role / admin_permission_point / admin_role_permission / admin_account_role
 mc_role    / mc_permission_point    / mc_role_permission    / mc_account_role
 oauth_role / oauth_permission_point / oauth_role_permission / oauth_account_role
 ```
-六张表、两个命名空间(`admin:mc:profile:read` 与 `mc:profile:read`),两套都要维护,且职责边界从未定义。
+六张表、两个命名空间(`admin:mc:profile:read` 与 `minecraft:profile:read`),两套都要维护,且职责边界从未定义。
 
 新版:
 ```
@@ -124,9 +124,9 @@ account_role
 | `audit:read` | 审计日志查看 |
 | `oidc:client:read` / `oidc:client:write` | OIDC 客户端管理 |
 | `oidc:token:revoke` | 吊销令牌 |
-| `mc:profile:read` / `mc:profile:write` | 玩家档案 |
-| `mc:texture:read` / `mc:texture:write` | 材质库 |
-| `mc:server:read` / `mc:server:write` | 服务器白名单 |
+|  `minecraft:profile:read` / `minecraft:profile:write` | 玩家档案 |
+|  `minecraft:texture:read` / `minecraft:texture:write` | 材质库 |
+|  `minecraft:server:read` / `minecraft:server:write` | 服务器白名单 |
 
 区分「域管理员」与「平台管理员」不再靠两套表,而是靠**角色绑定的权限点集合**。后台菜单按角色实际持有的权限点过滤,行为不变但模型简单得多。
 

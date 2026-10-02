@@ -40,28 +40,28 @@
 **目标**:把「与业务无关的通用能力」建成可复用底座。
 
 ### 配置
-- [ ] `internal/config`:环境变量加载 + 类型转换 + 启动即校验(失败直接退出,带清晰错误)
-- [ ] 配置项分组:`app` / `db` / `auth` / `storage` / `oidc` / `mc` / `mail` / `log`
-- [ ] 敏感项(数据库密码、`KEY_MASTER_SECRET`)启动日志中脱敏
+- [x] `internal/config`:环境变量加载 + 类型转换 + 启动即校验(失败直接退出,带清晰错误)
+- [x] 配置项分组:`app` / `db` / `auth` / `storage` / `oidc` / `mc` / `mail` / `log`
+- [x] 敏感项(数据库密码、`KEY_MASTER_SECRET`)启动日志中脱敏
 
 ### 日志与可观测
-- [ ] `internal/platform/log`:基于 `log/slog` 的 JSON 结构化日志,带 `request_id`、`domain`、`account_id` 上下文
-- [ ] `/health/live`(存活)、`/health/ready`(就绪,探 DB)、`/metrics`(Prometheus)
+- [x] `internal/platform/log`:基于 `log/slog` 的 JSON 结构化日志,带 `request_id`、`domain`、`account_id` 上下文
+- [x] `/health/live`(存活)、`/health/ready`(就绪,探 DB)、`/metrics`(Prometheus)
 
 ### 数据库
-- [ ] `internal/platform/db`:连接池(`pgx/v5` + `pgxpool`)、事务辅助函数、`Ping` 自检
-- [ ] `db/migrations/`:goose 迁移目录,首版 baseline
-- [ ] `db/queries/`:sqlc 查询定义
-- [ ] `make sqlc` 生成,CI 校验生成物与源码一致
+- [x] `internal/platform/db`:连接池(`pgx/v5` + `pgxpool`)、事务辅助函数、`Ping` 自检
+- [x] `db/migrations/`:goose 迁移目录,首版 baseline
+- [x] `db/queries/`:sqlc 查询定义
+- [x] `make sqlc` 生成,CI 校验生成物与源码一致
 
 ### 错误与响应
-- [ ] `internal/platform/apperr`:业务错误码枚举 → HTTP 状态码映射
-- [ ] 统一响应包 `{"code":0,"message":"ok","data":{...}}`
-- [ ] 全局 error handler:内部错误只回泛化消息,细节进日志
-- [ ] request ID 中间件 + panic recover 中间件
+- [x] `internal/platform/apperr`:业务错误码枚举 → HTTP 状态码映射
+- [x] 统一响应包 `{"code":0,"message":"ok","data":{...}}`
+- [x] 全局 error handler:内部错误只回泛化消息,细节进日志
+- [x] request ID 中间件 + panic recover 中间件
 
 ### 工具
-- [ ] `internal/platform/uuid`、`internal/platform/clock`(便于测试注入)、`internal/platform/rand`
+- [x] `internal/platform/uuid`、`internal/platform/clock`(便于测试注入)、`internal/platform/rand`
 
 **验收**:`make migrate` 能建库,`/health/ready` 返回 DB 状态,非法配置启动即失败。
 
