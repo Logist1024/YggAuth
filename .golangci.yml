@@ -1,0 +1,64 @@
+# golangci-lint v2 配置
+# 依据 docs/01-roadmap.md M0:gofumpt + errcheck + staticcheck 为必需项。
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  # standard = errcheck + govet + ineffassign + staticcheck + unused
+  default: standard
+  enable:
+    - revive         # 命名与可读性
+    - misspell       # 拼写
+    - unconvert      # 无意义的类型转换
+    - bodyclose      # http response body 未关闭
+    - noctx          # 缺少 context 的 HTTP 请求
+    - prealloc       # slice 可预分配
+    - errorlint      # 错误比较要用 errors.Is
+    - nilerr         # return nil 前忽略了 err
+    - copyloopvar    # Go 1.22+ 循环变量捕获
+    - godot          # 注释句末要有标点
+  settings:
+    revive:
+      rules:
+        - name: exported
+          disabled: false
+        - name: package-comments
+          disabled: true
+        - name: var-naming
+          disabled: false
+    misspell:
+      locale: US
+  exclusions:
+    rules:
+      # 测试文件放宽 errcheck 与未使用检查
+      - path: _test\.go
+        linters:
+          - errcheck
+          - unused
+      # 生成物不检查
+      - path: internal/platform/db/query/
+        linters:
+          - all
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/yggauth/yggauth
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # godot:中文注释允许以中文句号结尾,不强制半角标点
+    - linters: [godot]
+      source: "^//.*[^。.:;!?]$"
+    # handler 里未使用参数很常见,单独放宽
+    - linters: [revive]
+      text: "unused-parameter"

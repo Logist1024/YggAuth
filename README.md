@@ -21,7 +21,7 @@
 
 | 层 | 选型 |
 |---|---|
-| 后端 | **Go 1.24+** + chi |
+| 后端 | **Go 1.27+** + chi |
 | 数据库 | **PostgreSQL 16+**(pgx + **sqlc** + goose) |
 | OIDC | **ory/fosite**(不自研安全敏感逻辑) |
 | 密码哈希 | argon2id |

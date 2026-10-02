@@ -23,13 +23,13 @@
 
 **目标**:能编译、能跑测试、能起一个空服务。
 
-- [ ] 初始化 Go module `github.com/yggauth/yggauth`
-- [ ] 目录骨架:`cmd/`、`internal/`、`db/`、`web/`、`deploy/`
-- [ ] `Makefile`:`make build` / `make test` / `make lint` / `make dev` / `make sqlc` / `make migrate`
-- [ ] 工具链版本锁定:Go 1.24、Node 22、pnpm 10(`.tool-versions`)
-- [ ] lint 配置:`golangci-lint`(含 `gofumpt`、`errcheck`、`staticcheck`)
-- [ ] GitHub Actions:`build` + `test` + `lint` 三 job
-- [ ] `cmd/yggauth/main.go` 骨架,`GET /health/live` 返回 200
+- [x] 初始化 Go module `github.com/yggauth/yggauth`
+- [x] 目录骨架:`cmd/`、`internal/`、`db/`、`web/`、`deploy/`
+- [x] `Makefile`:`make build` / `make test` / `make lint` / `make dev` / `make sqlc` / `make migrate`
+- [x] 工具链版本锁定:Go 1.27、Node 24、pnpm 11(`.tool-versions`)
+- [x] lint 配置:`golangci-lint`(含 `gofumpt`、`errcheck`、`staticcheck`)
+- [x] GitHub Actions:`build` + `test` + `lint` 三 job
+- [x] `cmd/yggauth/main.go` 骨架,`GET /health/live` 返回 200
 
 **验收**:空服务能启动,CI 全绿。
 

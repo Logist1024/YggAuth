@@ -54,7 +54,7 @@ docker compose up -d --build
 
 ```dockerfile
 # ---------- 前端构建 ----------
-FROM node:22-alpine AS web
+FROM node:24-alpine AS web
 WORKDIR /web
 RUN corepack enable && corepack prepare pnpm@10 --activate
 COPY web/package.json web/pnpm-lock.yaml ./
@@ -63,7 +63,7 @@ COPY web/ ./
 RUN pnpm build
 
 # ---------- Go 构建 ----------
-FROM golang:1.24-alpine AS build
+FROM golang:1.27-alpine AS build
 RUN apk add --no-cache git
 WORKDIR /src
 COPY go.mod go.sum ./
