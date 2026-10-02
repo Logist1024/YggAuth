@@ -242,8 +242,8 @@ type OidcAuthorizationCode struct {
 	RedirectUri         string             `json:"redirect_uri"`
 	Scopes              []string           `json:"scopes"`
 	Nonce               pgtype.Text        `json:"nonce"`
-	CodeChallenge       string             `json:"code_challenge"`
-	CodeChallengeMethod string             `json:"code_challenge_method"`
+	CodeChallenge       pgtype.Text        `json:"code_challenge"`
+	CodeChallengeMethod pgtype.Text        `json:"code_challenge_method"`
 	Session             []byte             `json:"session"`
 	Request             []byte             `json:"request"`
 	ExpiresAt           time.Time          `json:"expires_at"`
@@ -269,6 +269,12 @@ type OidcClient struct {
 	UpdatedAt            time.Time       `json:"updated_at"`
 }
 
+type OidcClientAssertion struct {
+	Jti       string    `json:"jti"`
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type OidcConsent struct {
 	ID        uuid.UUID `json:"id"`
 	AccountID uuid.UUID `json:"account_id"`
@@ -292,6 +298,15 @@ type OidcDeviceCode struct {
 	ExpiresAt      time.Time          `json:"expires_at"`
 	LastPolledAt   pgtype.Timestamptz `json:"last_polled_at"`
 	CreatedAt      time.Time          `json:"created_at"`
+}
+
+type OidcPkceRequest struct {
+	Signature       []byte    `json:"signature"`
+	Challenge       string    `json:"challenge"`
+	ChallengeMethod string    `json:"challenge_method"`
+	Session         []byte    `json:"session"`
+	Request         []byte    `json:"request"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 type OidcPushedAuthorizationRequest struct {

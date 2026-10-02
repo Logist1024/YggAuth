@@ -489,3 +489,40 @@ request        JSONB NOT NULL,         -- 序列化后的原始 fosite.Request
 
 `app.setting` 预置 11 条默认值(注册模式、密码长度、会话时长、邮件节流、改名保留期等),
 与迁移种子一致,启动后由后台接管。
+
+---
+
+## 十、实施补充(M3 落地时的 schema 调整)
+
+M3 把授权服务真正接上 fosite 之后,基线(00001–00004)里有三处假设与实现不符。
+基线迁移保持不可变,所有调整都写在后续迁移里。
+
+### 10.1 新增表
+
+| 表 | 迁移 | 用途 |
+|---|---|---|
+| `oidc.client_assertion` | `00005` | RFC 7523 的 `jti` 防重放。fosite 的 `ClientManager` 要求提供这个存储 |
+| `oidc.pkce_request` | `00006` | PKCE 挑战值。键是 `AuthorizeCodeSignature(code)`,与授权码表按 `sha256(code)` 建的键不同,所以要独立存储 |
+
+### 10.2 放宽约束
+
+`00007` 把 `oidc.authorization_code` 的 `code_challenge` / `code_challenge_method`
+改为可空,CHECK 约束同步放宽为「为空或等于 S256」。
+
+**原因**:基线假设 PKCE 存在授权码行里。实际上 PKCE 有独立的存储(见 10.1),
+授权码表上这两列只是冗余快照;而 `fosite` 是在 `CreateAuthorizeCodeSession`
+**之后**才 `GrantScope`,写入时客户端若未启用 PKCE,写入的就是空串。
+写入侧改为传 `NULL` 而不是 `''` —— CHECK 约束拒绝空串,但接受 NULL。
+
+### 10.3 与 fosite 的映射约定
+
+`internal/oidc/storage.go` 是 fosite 与本 schema 之间**唯一**的适配点。三条约定:
+
+1. **明文令牌不入库**。fosite 交给我们的是 HMAC 签名,不是明文令牌;
+   存储层把它当查找键与存在性凭证 —— 它本身就是 HMAC 的结果。
+2. **会话与请求分开存**。`session` 列存 `fosite.Session`,`request` 列存
+   `storedRequest` DTO。**不能直接 `json.Marshal(fosite.Request)`**:它有
+   `Client`、`Session` 两个接口字段,JSON 反序列化必然失败。DTO 里也不保存
+   客户端信息 —— 还原时按 ID 重新查库。
+3. **已授予的 scope 以数据库列为准**,不采信 JSON 里的副本:那份载荷虽然
+   签过名,但没有加密。

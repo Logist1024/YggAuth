@@ -14,58 +14,114 @@ import (
 
 type Querier interface {
 	AddRolePermission(ctx context.Context, arg AddRolePermissionParams) error
+	// 用户在浏览器端批准。approved 之前轮询令牌一律返回 authorization_pending。
+	ApproveDeviceCode(ctx context.Context, arg ApproveDeviceCodeParams) (OidcDeviceCode, error)
+	ConsumeDeviceCode(ctx context.Context, id uuid.UUID) (int64, error)
 	// 一次性使用:条件里带 used_at IS NULL,天然防重放。
 	ConsumeEmailToken(ctx context.Context, tokenHash []byte) (IdentityEmailToken, error)
 	// 核销邀请码。used_count 的上限判断放在条件里,避免读改写竞态。
 	// $2 是可选的邮箱绑定:邀请码绑定了邮箱时,只有该邮箱能使用。
 	ConsumeInvitation(ctx context.Context, arg ConsumeInvitationParams) (IdentityInvitation, error)
+	// 一次性消费:PAR 的 request_uri 用掉即作废。
+	ConsumePAR(ctx context.Context, requestUriHash []byte) (int64, error)
 	CountAccounts(ctx context.Context, arg CountAccountsParams) (int64, error)
 	CountAccountsWithRole(ctx context.Context, roleID uuid.UUID) (int64, error)
 	CountActiveSessions(ctx context.Context, accountID uuid.UUID) (int64, error)
 	CountAuditEvents(ctx context.Context, arg CountAuditEventsParams) (int64, error)
 	// 归档任务用:统计某个时间点之前的行数。
 	CountAuditEventsBefore(ctx context.Context, occurredAt time.Time) (int64, error)
+	CountClients(ctx context.Context, arg CountClientsParams) (int64, error)
 	// 邮件每日发送上限(5 次/天)。
 	CountEmailTokensSince(ctx context.Context, arg CountEmailTokensSinceParams) (int64, error)
+	// ---------------------------------------------------------------- 访问令牌
+	CreateAccessToken(ctx context.Context, arg CreateAccessTokenParams) (OidcAccessToken, error)
 	CreateAccount(ctx context.Context, arg CreateAccountParams) (IdentityAccount, error)
+	// ---------------------------------------------------------------- 授权码
+	CreateAuthorizationCode(ctx context.Context, arg CreateAuthorizationCodeParams) (OidcAuthorizationCode, error)
+	CreateClient(ctx context.Context, arg CreateClientParams) (OidcClient, error)
+	// ---------------------------------------------------------------- 客户端断言 JWT
+	// 防重放:同一个 jti 只允许用一次。
+	CreateClientAssertion(ctx context.Context, arg CreateClientAssertionParams) (string, error)
+	// ---------------------------------------------------------------- 设备码(RFC 8628)
+	CreateDeviceCode(ctx context.Context, arg CreateDeviceCodeParams) (OidcDeviceCode, error)
 	CreateEmailToken(ctx context.Context, arg CreateEmailTokenParams) (IdentityEmailToken, error)
 	CreateInvitation(ctx context.Context, arg CreateInvitationParams) (IdentityInvitation, error)
+	// ---------------------------------------------------------------- PAR(RFC 9126)
+	CreatePAR(ctx context.Context, arg CreatePARParams) (OidcPushedAuthorizationRequest, error)
+	// ---------------------------------------------------------------- PKCE 会话
+	CreatePKCERequest(ctx context.Context, arg CreatePKCERequestParams) (OidcPkceRequest, error)
+	// ---------------------------------------------------------------- 刷新令牌
+	CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) (OidcRefreshToken, error)
 	CreateRole(ctx context.Context, arg CreateRoleParams) (IdentityRole, error)
 	// 只存 sha256(token),不存明文。
 	CreateSession(ctx context.Context, arg CreateSessionParams) (IdentitySession, error)
+	// 轮换第二步:插入新的 active 密钥。
+	//
+	// 必须与上一步分成两条语句:idx_signing_key_active 是 status 列上的
+	// 唯一索引,而同一条语句里的数据修改 CTE 对该索引的检查不可见 ——
+	// 合成一条会稳定撞上 duplicate key。
+	CreateSigningKey(ctx context.Context, arg CreateSigningKeyParams) (OidcSigningKey, error)
 	DeleteAccount(ctx context.Context, id uuid.UUID) (int64, error)
+	DeleteClient(ctx context.Context, clientID string) (int64, error)
+	DeleteConsent(ctx context.Context, arg DeleteConsentParams) (int64, error)
+	DeleteExpiredAccessTokens(ctx context.Context) (int64, error)
+	DeleteExpiredAuthorizationCodes(ctx context.Context) (int64, error)
+	DeleteExpiredClientAssertions(ctx context.Context) (int64, error)
+	DeleteExpiredDeviceCodes(ctx context.Context) (int64, error)
 	DeleteExpiredEmailTokens(ctx context.Context) (int64, error)
 	DeleteExpiredInvitations(ctx context.Context) (int64, error)
+	DeleteExpiredPAR(ctx context.Context) (int64, error)
+	DeleteExpiredPKCERequests(ctx context.Context) (int64, error)
+	DeleteExpiredRefreshTokens(ctx context.Context) (int64, error)
 	// 后台清理任务用:删除已过期或已吊销超过 30 天的会话。
 	DeleteExpiredSessions(ctx context.Context) (int64, error)
+	DeletePKCERequest(ctx context.Context, signature []byte) (int64, error)
 	// 内置角色不可删。返回 0 行表示「角色不存在」或「是内置角色」,由服务层区分。
 	DeleteRole(ctx context.Context, id uuid.UUID) (int64, error)
 	DeleteSetting(ctx context.Context, key string) (int64, error)
+	DenyDeviceCode(ctx context.Context, id uuid.UUID) (int64, error)
 	// 导出 CSV 用:只按时间窗过滤,规模由调用方控制。
 	ExportAuditEvents(ctx context.Context, arg ExportAuditEventsParams) ([]IdentityAuditEvent, error)
+	GetAccessTokenByHash(ctx context.Context, tokenHash []byte) (OidcAccessToken, error)
+	GetAccessTokenBySignature(ctx context.Context, signature []byte) (OidcAccessToken, error)
 	// 邮箱唯一性按 lower(email) 判断(变更 C-10),登录/找回密码都走这里。
 	GetAccountByEmail(ctx context.Context, lower string) (IdentityAccount, error)
 	GetAccountByID(ctx context.Context, id uuid.UUID) (IdentityAccount, error)
 	GetAccountByUsername(ctx context.Context, usernameLower string) (IdentityAccount, error)
 	// 会话校验是最高频查询:只看未吊销、未过期的行。
 	GetActiveSessionByTokenHash(ctx context.Context, tokenHash []byte) (IdentitySession, error)
+	// ---------------------------------------------------------------- 签名密钥
+	GetActiveSigningKey(ctx context.Context) (OidcSigningKey, error)
+	GetAuthorizationCodeByHash(ctx context.Context, codeHash []byte) (OidcAuthorizationCode, error)
+	GetClient(ctx context.Context, clientID string) (OidcClient, error)
+	GetConsent(ctx context.Context, arg GetConsentParams) (OidcConsent, error)
 	GetCredential(ctx context.Context, arg GetCredentialParams) (IdentityCredential, error)
+	GetDeviceCodeByDeviceHash(ctx context.Context, deviceCodeHash []byte) (OidcDeviceCode, error)
+	GetDeviceCodeByUserHash(ctx context.Context, userCodeHash []byte) (OidcDeviceCode, error)
 	// 只取未使用且未过期的。校验和标记使用在同一个事务里完成。
 	GetEmailTokenByHash(ctx context.Context, tokenHash []byte) (IdentityEmailToken, error)
 	GetInvitationByCode(ctx context.Context, code string) (IdentityInvitation, error)
 	// 邮件重发冷却:看最近一次发信时间。
 	GetLastEmailToken(ctx context.Context, arg GetLastEmailTokenParams) (IdentityEmailToken, error)
+	GetPAR(ctx context.Context, requestUriHash []byte) (OidcPushedAuthorizationRequest, error)
+	GetPKCERequest(ctx context.Context, signature []byte) (OidcPkceRequest, error)
 	GetPermission(ctx context.Context, code string) (IdentityPermission, error)
+	GetRefreshTokenByHash(ctx context.Context, tokenHash []byte) (OidcRefreshToken, error)
+	GetRefreshTokenBySignature(ctx context.Context, signature []byte) (OidcRefreshToken, error)
 	GetRoleByCode(ctx context.Context, code string) (IdentityRole, error)
 	GetRoleByID(ctx context.Context, id uuid.UUID) (IdentityRole, error)
 	GetSessionByID(ctx context.Context, id uuid.UUID) (IdentitySession, error)
 	// 全局登出:把同一 SSO 会话下的所有终端用户会话一起吊销。
 	GetSessionBySSOID(ctx context.Context, ssoSessionID pgtype.UUID) ([]IdentitySession, error)
 	GetSetting(ctx context.Context, key string) (AppSetting, error)
+	GetSigningKey(ctx context.Context, kid string) (OidcSigningKey, error)
 	GrantRole(ctx context.Context, arg GrantRoleParams) (IdentityAccountRole, error)
 	HasPermission(ctx context.Context, arg HasPermissionParams) (bool, error)
 	// 审计表只追加,应用层没有任何删除接口(见 docs/09-security.md 9.2)。
 	InsertAuditEvent(ctx context.Context, arg InsertAuditEventParams) (IdentityAuditEvent, error)
+	// 核销授权码。条件里带 used_at IS NULL,天然防重放:
+	// 同一个码换第二次令牌会命中 0 行。
+	InvalidateAuthorizationCode(ctx context.Context, codeHash []byte) (int64, error)
 	// 重发验证邮件时作废同用途的旧令牌。
 	InvalidateEmailTokens(ctx context.Context, arg InvalidateEmailTokensParams) (int64, error)
 	LinkSessionToSSO(ctx context.Context, arg LinkSessionToSSOParams) error
@@ -76,19 +132,35 @@ type Querier interface {
 	// 搜索同时匹配用户名与邮箱;status 为 NULL 时不过滤状态。
 	ListAccounts(ctx context.Context, arg ListAccountsParams) ([]IdentityAccount, error)
 	ListActiveSessions(ctx context.Context, accountID uuid.UUID) ([]IdentitySession, error)
+	ListClients(ctx context.Context, arg ListClientsParams) ([]OidcClient, error)
 	ListInvitations(ctx context.Context, arg ListInvitationsParams) ([]ListInvitationsRow, error)
 	ListPermissions(ctx context.Context) ([]IdentityPermission, error)
 	ListRoleAccounts(ctx context.Context, roleID uuid.UUID) ([]IdentityAccount, error)
 	ListRolePermissions(ctx context.Context, roleID uuid.UUID) ([]IdentityPermission, error)
 	ListRoles(ctx context.Context, search pgtype.Text) ([]IdentityRole, error)
 	ListSettings(ctx context.Context) ([]AppSetting, error)
+	ListSigningKeys(ctx context.Context) ([]OidcSigningKey, error)
 	// 登录失败计数 +1。达到阈值时把 locked_until 推后 lock_secs 秒。
 	RecordFailedAttempt(ctx context.Context, arg RecordFailedAttemptParams) (IdentityCredential, error)
 	// 登录成功后清零。
 	ResetFailedAttempts(ctx context.Context, arg ResetFailedAttemptsParams) (IdentityCredential, error)
+	// 轮换第一步:把当前 active 密钥降级为 retired。
+	//
+	// 旧密钥**不删除** —— 已经发出的令牌还在用它签名,删掉会让存量令牌
+	// 立刻验签失败。它继续留在 JWKS 里直到被显式 revoke。
+	RetireActiveSigningKey(ctx context.Context) error
+	RevokeAccessToken(ctx context.Context, arg RevokeAccessTokenParams) (int64, error)
+	RevokeAccessTokenByHash(ctx context.Context, arg RevokeAccessTokenByHashParams) (int64, error)
+	RevokeAccessTokensByAccount(ctx context.Context, arg RevokeAccessTokensByAccountParams) (int64, error)
+	RevokeAccessTokensByClient(ctx context.Context, arg RevokeAccessTokensByClientParams) (int64, error)
 	// 改密码后调用:吊销该账号全部会话。
 	RevokeAllSessions(ctx context.Context, arg RevokeAllSessionsParams) (int64, error)
 	RevokeInvitation(ctx context.Context, id uuid.UUID) (int64, error)
+	RevokeRefreshTokenBySignature(ctx context.Context, arg RevokeRefreshTokenBySignatureParams) (int64, error)
+	// 检测到重放时吊销整条轮换链:沿着 rotated_from 往上把祖先全部作废。
+	RevokeRefreshTokenChain(ctx context.Context, arg RevokeRefreshTokenChainParams) (int64, error)
+	RevokeRefreshTokensByAccount(ctx context.Context, arg RevokeRefreshTokensByAccountParams) (int64, error)
+	RevokeRefreshTokensByClient(ctx context.Context, arg RevokeRefreshTokensByClientParams) (int64, error)
 	RevokeRole(ctx context.Context, arg RevokeRoleParams) (int64, error)
 	RevokeSession(ctx context.Context, arg RevokeSessionParams) (IdentitySession, error)
 	// 后台审计检索。可选参数为 NULL 时不参与过滤。
@@ -99,13 +171,20 @@ type Querier interface {
 	// 授权前先清空再写入,整体替换语义。
 	SetRolePermissions(ctx context.Context, roleID uuid.UUID) error
 	TouchCredentialChangedAt(ctx context.Context, arg TouchCredentialChangedAtParams) error
+	// 记录最近一次轮询,用于检测过于频繁的轮询。
+	TouchDeviceCodePoll(ctx context.Context, id uuid.UUID) error
 	// 滑动过期:只推进 idle_expires_at,绝不改 expires_at(绝对过期不因活跃而延长)。
 	TouchSession(ctx context.Context, arg TouchSessionParams) (IdentitySession, error)
 	// 只改展示层字段。username_lower 由服务层保证同步更新。
 	UpdateAccountProfile(ctx context.Context, arg UpdateAccountProfileParams) (IdentityAccount, error)
 	UpdateAccountStatus(ctx context.Context, arg UpdateAccountStatusParams) (IdentityAccount, error)
+	UpdateClient(ctx context.Context, arg UpdateClientParams) (OidcClient, error)
+	// 轮换密钥。旧密钥立即失效,属于有意为之的破坏性变更。
+	UpdateClientSecret(ctx context.Context, arg UpdateClientSecretParams) (OidcClient, error)
 	// is_system 的内置角色不允许改名改 code,避免破坏依赖角色 code 的脚本。
 	UpdateRole(ctx context.Context, arg UpdateRoleParams) (IdentityRole, error)
+	// ---------------------------------------------------------------- 同意记录
+	UpsertConsent(ctx context.Context, arg UpsertConsentParams) (OidcConsent, error)
 	// 每账号每算法一条(UNIQUE(account_id, algo)),支持多算法并存迁移。
 	UpsertCredential(ctx context.Context, arg UpsertCredentialParams) (IdentityCredential, error)
 	UpsertSetting(ctx context.Context, arg UpsertSettingParams) (AppSetting, error)

@@ -25,8 +25,8 @@ func TestMigrationsApplyAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取迁移版本失败: %v", err)
 	}
-	if version != 4 {
-		t.Fatalf("迁移版本 = %d,期望 4", version)
+	if version != 7 {
+		t.Fatalf("迁移版本 = %d,期望 7", version)
 	}
 
 	// 四个 schema 必须存在(ADR-002 的域隔离手段)。

@@ -102,30 +102,42 @@
 **目标**:业务系统接入的授权服务器。
 
 ### fosite 集成
-- [ ] 接入 `ory/fosite`,配置存储实现
-- [ ] `oauth_client` 表(redirect_uris / grant_types / scopes / PKCE 强制)
-- [ ] 支持 flow:授权码 + PKCE(强制)、refresh token、client_credentials
-- [ ] 密钥管理:`KEY_MASTER_SECRET` 加密私钥存储,`kid` 形如 `oidc-<random>`,支持轮换
-- [ ] JWKS 端点,`kid` 与私钥一一对应
+- [x] 接入 `ory/fosite`,配置存储实现(`internal/oidc/storage.go` 是唯一适配点)
+- [x] `oidc.client` 表(redirect_uris / grant_types / scopes / PKCE 强制)
+- [x] 支持 flow:授权码 + PKCE(强制,S256 only)、refresh token、client_credentials
+- [x] 密钥管理:`KEY_MASTER_SECRET` 加密私钥存储,`kid` 形如 `oidc-<random>`,支持轮换
+- [x] JWKS 端点,`kid` 与私钥一一对应
+
+> **实现偏差(已定稿)**:
+> - 未装配 ROPC 与 RFC 7523 断言流程。OAuth 2.1 移除了前者;后者需要「可信任的对等服务端」,
+>   本项目没有。两者对应的 `grant_type` 会按 RFC 6749 返回错误,而不是留一段永远失败的代码。
+> - 客户端密钥用 bcrypt 而非 argon2id:密钥是 256 位随机串,没有字典可爆破,内存硬 KDF
+>   不带来额外收益;且 fosite 的 `SecretsHasher` 默认实现就是 bcrypt。
+> - PKCE 挑战存在独立的 `oidc.pkce_request` 表,`oidc.authorization_code` 上的两列
+>   只是冗余快照(见迁移 00006 / 00007)。
 
 ### 端点
-- [ ] `GET /oauth/.well-known/openid-configuration`(discovery)
-- [ ] `GET /oauth/.well-known/jwks.json`
-- [ ] `GET /oauth/authorize`、`POST /oauth/token`
-- [ ] `GET|POST /oauth/userinfo`
-- [ ] `POST /oauth/introspect`、`POST /oauth/revoke`
-- [ ] `GET|POST /oauth/endsession`(RP-initiated logout)
-- [ ] `POST /oauth/par`(Pushed Authorization Request)、`POST /oauth/device`(可选,视时间)
+- [x] `GET /oauth/.well-known/openid-configuration`(discovery)
+- [x] `GET /oauth/.well-known/jwks.json`
+- [x] `GET /oauth/authorize`、`POST /oauth/authorize/decision`(同意页)
+- [x] `POST /oauth/token`
+- [x] `GET|POST /oauth/userinfo`
+- [x] `POST /oauth/introspect`、`POST /oauth/revoke`
+- [x] `GET|POST /oauth/endsession`(RP-initiated logout)
+- [x] `POST /oauth/par`(Pushed Authorization Request,RFC 9126)
+- [x] `POST /oauth/device/auth` + `GET /api/device` / `POST /api/device/decision`(设备码,RFC 8628)
 
 ### SSO
-- [ ] `GET /api/sso/authorize`:已登录则静默发码,未登录则跳登录页
-- [ ] `POST /api/sso/logout`
-- [ ] Cookie 域按 `APP_PUBLIC_DOMAIN` 自动推导父域
+- [x] `GET /api/sso/status`:已登录直接发码,未登录由 `/oauth/authorize` 跳登录页
+- [x] `POST /api/sso/decision`、`POST /api/sso/logout`
+- [x] Cookie 域按 `APP_PUBLIC_DOMAIN` 自动推导父域
 
 ### 限流
-- [ ] `authorize` / `token` / `userinfo` 独立限流维度(IP / 账号)
+- [x] `authorize` / `token` / `device` 独立限流维度(IP)
 
-**验收**:用标准 OIDC 客户端(如 `oauth2-proxy` / `keycloak-gatekeeper`)能完整走通授权码流程。
+**验收**:用标准 OIDC 客户端能完整走通授权码流程。
+**实测**:`internal/oidc` 集成测试覆盖 discovery、JWKS、授权码 + PKCE 全链路、
+授权码重放拒绝、PKCE 校验、回调地址精确匹配、内省客户端认证、设备码四态、PAR。
 
 ---
 

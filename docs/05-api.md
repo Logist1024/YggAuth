@@ -134,6 +134,11 @@ POST /api/auth/login
 
 前缀 `/oauth`。标准端点,`application/x-www-form-urlencoded` 编解码。
 
+> **不套 CSRF**:`/oauth` 整段挂在根上,不经过 `/api` 的 `CSRFProtect`。
+> 令牌、内省这些端点是机器对机器的调用,标准 OAuth 客户端不会、也不该为了
+> 发一次令牌请求先取一个 CSRF token。浏览器只会跟随 `GET` 授权跳转,
+> 而那些跳转不改变服务端状态。
+
 | 方法 | 路径 | 认证 | 说明 |
 |---|---|---|---|
 | GET | `/oauth/.well-known/openid-configuration` | 公开 | Discovery |
@@ -145,7 +150,12 @@ POST /api/auth/login
 | POST | `/oauth/introspect` | 客户端认证 | 令牌内省 |
 | POST | `/oauth/revoke` | 客户端认证 | 吊销令牌 |
 | GET/POST | `/oauth/endsession` | 会话 | RP 发起登出 |
-| POST | `/oauth/par` | 公开 | 推送授权请求(可选) |
+| POST | `/oauth/par` | 公开 | 推送授权请求(RFC 9126) |
+| POST | `/oauth/device/auth` | 公开 | 设备授权请求(RFC 8628) |
+
+> 令牌端点**不走**统一响应包 —— RFC 6749 规定它返回 OAuth 标准结构,
+> 标准客户端解析不了 `{code,message,data}`。同理,`/oauth/par` 成功时返回
+> `201` + `request_uri`(RFC 9126 §2.2)。
 
 **Discovery 响应**(节选)
 ```json
@@ -155,14 +165,20 @@ POST /api/auth/login
   "token_endpoint": "https://auth.example.com/oauth/token",
   "userinfo_endpoint": "https://auth.example.com/oauth/userinfo",
   "jwks_uri": "https://auth.example.com/oauth/.well-known/jwks.json",
+  "pushed_authorization_request_endpoint": "https://auth.example.com/oauth/par",
+  "device_authorization_endpoint": "https://auth.example.com/oauth/device/auth",
   "response_types_supported": ["code"],
-  "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
+  "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials",
+                            "urn:ietf:params:oauth:grant-type:device_code"],
   "code_challenge_methods_supported": ["S256"],
-  "scopes_supported": ["openid", "profile", "email"]
+  "scopes_supported": ["openid", "profile", "email", "offline_access"]
 }
 ```
 
 > `issuer` 必须与实际访问域名**完全一致**(含协议),否则标准 OIDC 客户端会在验签阶段拒绝所有令牌。
+
+> `grant_types_supported` 里**没有** `password`:OAuth 2.1 移除了 ROPC。
+> 本项目也没有装配它,所以该 `grant_type` 会被按 RFC 6749 拒绝。
 
 **Token 响应**
 ```json
@@ -176,22 +192,66 @@ POST /api/auth/login
 }
 ```
 
-### 3.1 SSO 静默发码
+> `refresh_token` **只在**请求了 `offline_access` 时签发。
+> `id_token` 只在请求了 `openid` 时签发。
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/api/sso/authorize` | 业务系统引导登录入口 |
-| GET | `/api/sso/login-challenge` | 查询 challenge 状态(前端轮询用) |
-| POST | `/api/sso/logout` | 全局登出 |
+### 3.1 SSO
+
+| 方法 | 路径 | 认证 | 说明 |
+|---|---|---|---|
+| GET | `/api/sso/status` | 公开 | 当前 SSO 状态(前端决定走同意页还是登录页) |
+| POST | `/api/sso/decision` | 会话 | 同意范围校验 |
+| POST | `/api/sso/logout` | 公开 | 全局登出 |
 
 **流程**:
-1. 业务系统跳转到 `https://auth.example.com/api/sso/authorize?client_id=xxx&redirect_uri=yyy&state=zzz`
-2. 若已有有效会话 → **静默**重定向回业务系统,带上授权码(用户无感知)
-3. 若无会话 → 跳转登录页,登录成功后回到步骤 2
+1. 业务系统把浏览器送到 `/oauth/authorize?client_id=xxx&...`
+2. 若已有有效会话且该客户端此前已获得同意 → **静默**发码重定向回业务系统
+3. 若无会话 → 跳转 `/login?continue=<原授权请求>`,登录成功后回到步骤 2
+4. 若有会话但未同意过 → 返回同意页数据,前端渲染后 `POST /oauth/authorize/decision`
+
+> 待确认的授权请求暂存在**带 HMAC 签名的 HttpOnly cookie** 里,而不是服务端。
+> 这样保持单进程无状态部署(ADR-007 已接受多副本限制),且篡改会在验签时被拒。
+> 还原时用原始查询串让 fosite **重新解析一遍**,不在业务层手工拼请求 ——
+> 否则迟早会漏掉某个校验项。
 
 Cookie 域由 `APP_PUBLIC_DOMAIN` 推导父域(如 `auth.example.com` → `.example.com`),实现跨子域共享登录态。
 
 > **本地测试注意**:`localhost` 无父域,必须 `SSO_COOKIE_DOMAIN=` 留空且 `SSO_COOKIE_SECURE=false`,否则浏览器丢弃 cookie,静默发码静默失效。
+
+### 3.2 设备码流程(RFC 8628)
+
+设备端在电视/命令行上登录:设备拿不到浏览器,用户改用手机完成授权。
+
+| 方法 | 路径 | 认证 | 说明 |
+|---|---|---|---|
+| POST | `/oauth/device/auth` | 公开 | 换设备码与用户码 |
+| POST | `/oauth/token` | 公开 | `grant_type=urn:ietf:params:oauth:grant-type:device_code` 轮询 |
+| GET | `/api/device?user_code=xxx` | 会话 | 查询待批准信息 |
+| POST | `/api/device/decision` | 会话 | 批准 / 拒绝 |
+
+**流程**:
+1. 设备调 `/oauth/device/auth` → 拿到 `device_code`(256 位随机)、`user_code`(8 位,格式 `XXXX-XXXX`)、
+   `verification_uri_complete`、`interval`
+2. 设备展示 `verification_uri_complete`,用户在手机上输入 `user_code`
+3. 设备反复调 `/oauth/token`:
+   - 用户还没操作 → `{"error":"authorization_pending"}`
+   - 用户拒绝 → `{"error":"access_denied"}`
+   - 设备码过期 → `{"error":"expired_token"}`
+   - 已批准 → 正常返回令牌
+
+**约束**:
+- 设备码**一次性**,换过令牌即作废
+- 设备码与申请它的 `client_id` 绑定,换客户端会被拒
+- 未登录用户不能批准设备授权
+
+> 用户码字母表去掉了 `0/O/1/I/l` 这类易混字符,并允许用户输入成小写、
+> 无连字符 —— 用户要在另一台设备上手抄这串码,一个混淆字符就多一类
+> 「明明输对了却提示无效」的支持工单。
+
+### 3.3 客户端管理
+
+客户端的登记与轮换目前通过管理后台(`/api/admin/clients`)完成,
+明细见 [docs/05-api.md](05-api.md) 第五节。
 
 ## 四、Minecraft Yggdrasil API
 

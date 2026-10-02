@@ -108,10 +108,41 @@ func (rt *Router) Handler() http.Handler {
 			if rt.deps.Admin.Handler != nil {
 				rt.deps.Admin.Handler.Mount(r)
 			}
+			if rt.deps.OIDC.SSO != nil {
+				rt.deps.OIDC.SSO.Mount(&ssoRoutes{r})
+			}
+			if rt.deps.OIDC.Device != nil {
+				rt.mountDeviceRoutes(r)
+			}
 		})
 	}
 
+	// /oauth 是标准协议前缀,整段挂在根上。
+	//
+	// 它**不套** CSRF:令牌、授权、内省这些端点是机器对机器的调用。
+	// 给它们加 CSRF 只会让标准 OAuth 客户端全部无法工作 ——
+	// 它们不会、也不该为了发一次令牌请求而先取一个 CSRF token。
+	if rt.deps.OIDC.Handler != nil {
+		r.Route("/oauth", rt.deps.OIDC.Handler.Mount)
+	}
+
 	return r
+}
+
+// ssoRoutes 把 chi.Router 适配成 SSO 处理器需要的最小形状。
+type ssoRoutes struct{ r chi.Router }
+
+// Get 注册 GET 路由。
+func (s *ssoRoutes) Get(pattern string, h http.HandlerFunc) { s.r.Get("/sso"+pattern, h) }
+
+// Post 注册 POST 路由。
+func (s *ssoRoutes) Post(pattern string, h http.HandlerFunc) { s.r.Post("/sso"+pattern, h) }
+
+// mountDeviceRoutes 挂载设备码的用户批准端点。
+func (rt *Router) mountDeviceRoutes(r chi.Router) {
+	h := rt.deps.OIDC.Handler
+	r.Get("/device", h.DeviceVerifyPage)
+	r.Post("/device/decision", h.DeviceDecision)
 }
 
 // sessionAuth 返回会话认证中间件;未装配账号内核时退化为直通。

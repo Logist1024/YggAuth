@@ -20,21 +20,26 @@ import (
 	"github.com/yggauth/yggauth/internal/identity/audit"
 	"github.com/yggauth/yggauth/internal/identity/rbac"
 	"github.com/yggauth/yggauth/internal/identity/session"
+	"github.com/yggauth/yggauth/internal/oidc"
 	"github.com/yggauth/yggauth/internal/platform/apperr"
 	"github.com/yggauth/yggauth/internal/platform/clock"
 	"github.com/yggauth/yggauth/internal/platform/db/testdb"
+	"github.com/yggauth/yggauth/internal/platform/keys"
 	"github.com/yggauth/yggauth/internal/transport"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type nopLogger struct{}
 
+func (nopLogger) Error(string, ...any) {}
 func (nopLogger) Info(string, ...any)  {}
 func (nopLogger) Warn(string, ...any)  {}
-func (nopLogger) Error(string, ...any) {}
 
 type env struct {
-	handler http.Handler
-	svc     *identity.Service
+	handler       http.Handler
+	svc           *identity.Service
+	clientService *oidc.ClientService
+	keys          *keys.Manager
 }
 
 func newEnv(t *testing.T) *env {
@@ -42,6 +47,14 @@ func newEnv(t *testing.T) *env {
 
 	pool := testdb.Fresh(t)
 	clk := clock.New()
+	// 后台的客户端页要读写签名密钥,这里装配一套真密钥管理器
+	testKeys, err := keys.NewManager(keys.Options{
+		MasterSecret: "admin-test-secret-at-least-32-bytes-long",
+		KidPrefix:    "oidc",
+		BitSize:      2048,
+	}, keys.NewPGStore(pool))
+	require.NoError(t, err)
+	clientSvc := oidc.NewClientService(pool, oidc.NewSecretHasher(testSecretHasher))
 
 	svc := identity.New(identity.Deps{
 		Accounts: account.NewPgRepository(pool),
@@ -81,14 +94,17 @@ func newEnv(t *testing.T) *env {
 			Service: svc,
 			Handler: admin.NewHandler(admin.Deps{
 				Identity:      svc,
+				OIDC:          clientSvc,
+				OIDCKeys:      testKeys,
 				Settings:      config.NewSettingStore(pool),
 				DB:            pool,
+				Logger:        nopLogger{},
 				PublicBaseURL: "https://auth.example.com",
 			}),
 		},
 	}).Handler()
 
-	return &env{handler: handler, svc: svc}
+	return &env{handler: handler, svc: svc, clientService: clientSvc, keys: testKeys}
 }
 
 type envelope struct {
@@ -548,4 +564,16 @@ func callRecorder(t *testing.T, h http.Handler, path string, cookies ...*http.Co
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
+}
+
+// testSecretHasher 是后台测试用的客户端密钥哈希器。
+//
+// 用 bcrypt 的最低成本参数:这里测的是「密钥能创建、能轮换、列表里不泄露」,
+// 不是抗暴力破解的成本。
+func testSecretHasher(secret string) (string, error) {
+	digest, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.MinCost)
+	if err != nil {
+		return "", err
+	}
+	return string(digest), nil
 }

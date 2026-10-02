@@ -4,6 +4,7 @@ node_modules/
 
 # 构建产物
 bin/
+/yggauth
 dist/
 web/dist/
 web/*/dist/

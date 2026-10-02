@@ -76,6 +76,13 @@ func start(ctx context.Context) (*Instance, error) {
 		DataPath(filepath.Join(root, "data")).
 		BinariesPath(binDir()).
 		StartTimeout(3 * time.Minute).
+		// 本机 /dev/shm 只有 64MB,PostgreSQL 默认的 posix 动态共享内存在
+		// initdb 阶段就会耗尽它并报 "No space left on device"。
+		// mmap 走普通文件,没有这个上限。
+		StartParameters(map[string]string{
+			"dynamic_shared_memory_type": "mmap",
+			"shared_buffers":             "16MB",
+		}).
 		Logger(io.Discard))
 
 	if err := pg.Start(); err != nil {

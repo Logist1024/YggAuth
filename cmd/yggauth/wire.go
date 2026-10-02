@@ -12,9 +12,12 @@ import (
 	"github.com/yggauth/yggauth/internal/identity/audit"
 	"github.com/yggauth/yggauth/internal/identity/rbac"
 	"github.com/yggauth/yggauth/internal/identity/session"
+	"github.com/yggauth/yggauth/internal/oidc"
 	"github.com/yggauth/yggauth/internal/platform/clock"
 	"github.com/yggauth/yggauth/internal/platform/db"
+	"github.com/yggauth/yggauth/internal/platform/keys"
 	"github.com/yggauth/yggauth/internal/platform/mailer"
+	"github.com/yggauth/yggauth/internal/platform/ratelimit"
 
 	"github.com/yggauth/yggauth/internal/transport"
 )
@@ -79,8 +82,44 @@ func buildDeps(cfg *config.Config, logger *slog.Logger, pool *db.Pool) transport
 		cfg.App.BaseURL(),
 	)
 
+	//
+	// 密钥管理器做「有就复用、无就生成」,所以首次部署不需要手工初始化步骤。
+	keyManager, err := keys.NewManager(keys.Options{
+		MasterSecret: cfg.OIDC.KeyMasterSecret,
+		KidPrefix:    "oidc",
+		BitSize:      2048,
+	}, keys.NewPGStore(pool))
+	if err != nil {
+		// 装配失败属于配置错误,直接 panic:带着半套授权服务启动的实例
+		// 比启动失败更难排查,而且会对外提供「看起来能用」的授权端点
+		panic("初始化签名密钥失败: " + err.Error())
+	}
+
+	oidcServer, err := oidc.NewServer(cfg, pool, clk, keyManager, loggerAdapter{logger})
+	if err != nil {
+		panic("装配授权服务失败: " + err.Error())
+	}
+
+	sessionAdapter := oidc.NewSessionAdapter(identitySvc.Sessions, identitySvc, oidc.CookieConfig{
+		Name:     cfg.OIDC.CookieName,
+		Domain:   cookieDomain(cfg),
+		Secure:   cfg.OIDC.CookieSecure,
+		SameSite: sameSite(cfg.OIDC.CookieSameSite),
+		MaxAge:   int(cfg.Auth.SessionIdleTTL.Seconds()),
+	})
+
+	deviceService := oidc.NewDeviceService(pool, clk.Now, cfg.OIDC.DeviceCodeTTL, devicePollInterval(cfg))
+
+	oidcHandler := oidc.NewHandler(oidcHandlerDeps(cfg, oidcServer, sessionAdapter, deviceService, loggerAdapter{logger}))
+	// ---- 管理后台
+
+	//
+	// 放在授权服务之后:后台的「OIDC 客户端」页要读写客户端与签名密钥,
+	// 依赖方向是单向的 —— 授权服务不需要知道后台存在。
 	adminHandler := admin.NewHandler(admin.Deps{
 		Identity:      identitySvc,
+		OIDC:          oidcServer.Clients,
+		OIDCKeys:      keyManager,
 		Settings:      config.NewSettingStore(pool),
 		DB:            pool,
 		PublicBaseURL: cfg.App.BaseURL(),
@@ -91,6 +130,12 @@ func buildDeps(cfg *config.Config, logger *slog.Logger, pool *db.Pool) transport
 		Logger: logger,
 		DB:     pool,
 		Clock:  clk,
+		OIDC: transport.OIDCDeps{
+			Server:  oidcServer,
+			Handler: oidcHandler,
+			SSO:     oidc.NewSSO(oidcHandler),
+			Device:  deviceService,
+		},
 		Admin: transport.AdminDeps{
 			Service: identitySvc,
 			Handler: adminHandler,
@@ -167,4 +212,37 @@ func mailerCfg(cfg *config.Config) mailer.Config {
 		UseTLS:  !cfg.Mail.SMTPTLS,
 		Timeout: 10 * time.Second,
 	}
+}
+
+// oidcHandlerDeps 组装授权服务的 HTTP 依赖。
+func oidcHandlerDeps(
+	cfg *config.Config,
+	server *oidc.Server,
+	sessions oidc.SessionStore,
+	device *oidc.DeviceService,
+	logger loggerAdapter,
+) oidc.HandlerDeps {
+	return oidc.HandlerDeps{
+		Server:   server,
+		Cookies:  server.CookieConfig(),
+		Sessions: sessions,
+		Device:   device,
+		Limiter:  oidc.NewLimiter(ratelimit.New(nil)),
+		// 只有明确配置了反代才信任 X-Forwarded-For。
+		// 默认不信任,否则攻击者可以随手伪造来源 IP 绕过限流
+		TrustProxy: cfg.App.TrustProxyHeaders,
+		Logger:     logger,
+	}
+}
+
+// devicePollInterval 决定设备端建议的轮询间隔。
+//
+// RFC 8628 要求客户端「不得快于 interval 轮询」,过密轮询既浪费资源
+// 也会放大拒绝服务面。默认 5 秒。
+func devicePollInterval(cfg *config.Config) int {
+	const defaultInterval = 5
+	if cfg.OIDC.DeviceCodeTTL > 0 && cfg.OIDC.DeviceCodeTTL.Seconds() < defaultInterval {
+		return 1
+	}
+	return defaultInterval
 }

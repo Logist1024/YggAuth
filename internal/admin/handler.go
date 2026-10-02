@@ -7,6 +7,7 @@ package admin
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,10 +24,12 @@ import (
 	"github.com/yggauth/yggauth/internal/identity/account"
 	"github.com/yggauth/yggauth/internal/identity/audit"
 	"github.com/yggauth/yggauth/internal/identity/rbac"
+	"github.com/yggauth/yggauth/internal/oidc"
 	"github.com/yggauth/yggauth/internal/platform/apperr"
 
 	"github.com/yggauth/yggauth/internal/platform/db"
 	"github.com/yggauth/yggauth/internal/platform/httpx"
+	"github.com/yggauth/yggauth/internal/platform/keys"
 )
 
 // 权限点常量。
@@ -34,32 +37,42 @@ import (
 // 与迁移里的 seed 数据一一对应。写错一个字符串就等于把接口敞开或锁死,
 // 所以集中在这里声明,而不是散落在路由里。
 const (
-	PermAccountRead  = "account:read"
-	PermAccountWrite = "account:write"
-	PermRBACRead     = "rbac:read"
-	PermRBACWrite    = "rbac:write"
-	PermAuditRead    = "audit:read"
-	PermAuditExport  = "audit:export"
-	PermSettingRead  = "setting:read"
-	PermSettingWrite = "setting:write"
+	PermAccountRead     = "account:read"
+	PermAccountWrite    = "account:write"
+	PermRBACRead        = "rbac:read"
+	PermRBACWrite       = "rbac:write"
+	PermAuditRead       = "audit:read"
+	PermAuditExport     = "audit:export"
+	PermSettingRead     = "setting:read"
+	PermSettingWrite    = "setting:write"
+	PermOIDCClientRead  = "oidc:client:read"
+	PermOIDCClientWrite = "oidc:client:write"
 )
 
 // Deps 是后台接口的依赖。
 type Deps struct {
 	Identity *identity.Service
 	Settings *config.SettingStore
+	// OIDC 是可选依赖:未装配授权服务时后台的客户端页返回 501
+	OIDC *oidc.ClientService
+	// OIDCKeys 用于密钥轮换
+	OIDCKeys *keys.Manager
 	DB       *db.Pool
+	// Logger 记录内部错误细节。客户端只拿到通用错误码,
+	// 服务端日志是排障时唯一的线索。
+	Logger Logger
 	// PublicBaseURL 用于拼邀请链接
 	PublicBaseURL string
 }
 
 // Handler 是管理后台的 HTTP 处理器。
 type Handler struct {
-	deps Deps
+	deps   Deps
+	logger Logger
 }
 
 // NewHandler 创建后台处理器。
-func NewHandler(deps Deps) *Handler { return &Handler{deps: deps} }
+func NewHandler(deps Deps) *Handler { return &Handler{deps: deps, logger: deps.Logger} }
 
 // Mount 把后台路由挂到 /api/admin。
 func (h *Handler) Mount(r chi.Router) {
@@ -88,6 +101,12 @@ func (h *Handler) Mount(r chi.Router) {
 		r.With(httpx.RequirePermission(PermRBACWrite)).Post("/invitations", h.CreateInvitation)
 
 		r.With(httpx.RequirePermission(PermSettingRead)).Get("/settings", h.GetSettings)
+		r.With(httpx.RequirePermission(PermOIDCClientRead)).Get("/clients", h.ListOIDCClients)
+		r.With(httpx.RequirePermission(PermOIDCClientWrite)).Post("/clients", h.CreateOIDCClient)
+		r.With(httpx.RequirePermission(PermOIDCClientWrite)).Post("/clients/{clientID}/rotate-secret", h.RotateOIDCClientSecret)
+		r.With(httpx.RequirePermission(PermOIDCClientWrite)).Delete("/clients/{clientID}", h.DeleteOIDCClient)
+		r.With(httpx.RequirePermission(PermOIDCClientRead)).Get("/signing-keys", h.ListSigningKeys)
+		r.With(httpx.RequirePermission(PermOIDCClientWrite)).Post("/signing-keys/rotate", h.RotateSigningKey)
 		r.With(httpx.RequirePermission(PermSettingWrite)).Patch("/settings", h.UpdateSetting)
 	})
 }
@@ -141,7 +160,7 @@ var allMenus = []menuItem{
 	{Key: "roles", Path: "/roles", Title: "角色权限", Icon: "safety", Permission: PermRBACRead},
 	{Key: "invitations", Path: "/invitations", Title: "邀请管理", Icon: "mail", Permission: PermRBACWrite},
 	{Key: "audit", Path: "/audit", Title: "审计日志", Icon: "file-search", Permission: PermAuditRead},
-	{Key: "clients", Path: "/clients", Title: "OIDC 客户端", Icon: "api", Permission: "oidc:client:read"},
+	{Key: "clients", Path: "/clients", Title: "OIDC 客户端", Icon: "api", Permission: PermOIDCClientRead},
 	{Key: "mc_profiles", Path: "/mc/profiles", Title: "玩家档案", Icon: "idcard", Permission: "minecraft:profile:read"},
 	{Key: "mc_textures", Path: "/mc/textures", Title: "材质库", Icon: "picture", Permission: "minecraft:texture:read"},
 	{Key: "settings", Path: "/settings", Title: "应用配置", Icon: "setting", Permission: PermSettingRead},
@@ -836,4 +855,38 @@ func randomCode() (string, error) {
 		b.WriteByte(alphabet[int(v)%len(alphabet)])
 	}
 	return b.String(), nil
+}
+
+// Logger 是后台用到的日志器最小接口。
+type Logger interface {
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}
+
+// failInternal 记录内部错误并向客户端返回统一错误包。
+//
+// 统一错误包对客户端只有「服务器内部错误」一句话,没有它的话
+// 一次 500 就是彻底的黑盒。内部细节只进日志,不进响应 ——
+// 那会泄露表名、SQL 片段,甚至密钥长度。
+func (h *Handler) failInternal(w http.ResponseWriter, msg string, err error) {
+	if h.logger != nil {
+		h.logger.Error(msg, "error", fmt.Sprintf("%+v", err))
+	}
+	httpx.Fail(w, apperr.New(apperr.CodeInternal, msg))
+}
+
+// fail 记录错误并按原始业务码返回。
+//
+// 业务错误(参数不合法、冲突、未找到)原样透传 —— 前端靠业务码区分
+// 「改一下输入」和「稍后重试」,一律吞成 500 会让用户无从下手。
+// 非业务错误才退化成服务器内部错误。
+func (h *Handler) fail(w http.ResponseWriter, msg string, err error) {
+	if h.logger != nil {
+		h.logger.Warn(msg, "error", fmt.Sprintf("%+v", err))
+	}
+	if apperr.From(err).Code != apperr.CodeInternal {
+		httpx.Fail(w, err)
+		return
+	}
+	h.failInternal(w, msg, err)
 }

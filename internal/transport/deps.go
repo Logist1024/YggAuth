@@ -3,6 +3,7 @@ package transport
 import (
 	"github.com/yggauth/yggauth/internal/admin"
 	"github.com/yggauth/yggauth/internal/identity"
+	"github.com/yggauth/yggauth/internal/oidc"
 )
 
 // 各业务域的装配依赖。
@@ -18,8 +19,14 @@ type IdentityDeps struct {
 	Cookie  AuthConfig
 }
 
-// OIDCDeps 是授权服务的依赖(M3 填充)。
-type OIDCDeps struct{}
+// OIDCDeps 是授权服务的依赖。
+type OIDCDeps struct {
+	Server  *oidc.Server
+	Handler *oidc.Handler
+	SSO     *oidc.SSO
+	// Device 是设备码流程服务,用户批准端点用它
+	Device *oidc.DeviceService
+}
 
 // MCDeps 是游戏域的依赖(M4/M5 填充)。
 type MCDeps struct{}
