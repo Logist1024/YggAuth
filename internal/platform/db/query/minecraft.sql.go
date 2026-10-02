@@ -14,6 +14,15 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const addTextureReference = `-- name: AddTextureReference :exec
+UPDATE minecraft.texture SET ref_count = ref_count + 1 WHERE hash = $1
+`
+
+func (q *Queries) AddTextureReference(ctx context.Context, hash string) error {
+	_, err := q.db.Exec(ctx, addTextureReference, hash)
+	return err
+}
+
 const createMCAccessToken = `-- name: CreateMCAccessToken :one
 
 INSERT INTO minecraft.access_token (token_hash, profile_id, client_token, expires_at)
@@ -175,6 +184,60 @@ func (q *Queries) CreateServerSession(ctx context.Context, arg CreateServerSessi
 	return i, err
 }
 
+const createTexture = `-- name: CreateTexture :one
+INSERT INTO minecraft.texture (hash, type, size, mime, width, height)
+VALUES ($1, $2::text, $3::int,
+        $4::text, $5::int, $6::int)
+RETURNING id, hash, type, size, width, height, mime, ref_count, created_at, updated_at, last_used_at
+`
+
+type CreateTextureParams struct {
+	Hash   string `json:"hash"`
+	Type   string `json:"type"`
+	Size   int32  `json:"size"`
+	Mime   string `json:"mime"`
+	Width  int32  `json:"width"`
+	Height int32  `json:"height"`
+}
+
+func (q *Queries) CreateTexture(ctx context.Context, arg CreateTextureParams) (MinecraftTexture, error) {
+	row := q.db.QueryRow(ctx, createTexture,
+		arg.Hash,
+		arg.Type,
+		arg.Size,
+		arg.Mime,
+		arg.Width,
+		arg.Height,
+	)
+	var i MinecraftTexture
+	err := row.Scan(
+		&i.ID,
+		&i.Hash,
+		&i.Type,
+		&i.Size,
+		&i.Width,
+		&i.Height,
+		&i.Mime,
+		&i.RefCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.LastUsedAt,
+	)
+	return i, err
+}
+
+const deleteAvatar = `-- name: DeleteAvatar :execrows
+DELETE FROM minecraft.avatar WHERE profile_id = $1
+`
+
+func (q *Queries) DeleteAvatar(ctx context.Context, profileID uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteAvatar, profileID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteExpiredMCAccessTokens = `-- name: DeleteExpiredMCAccessTokens :execrows
 DELETE FROM minecraft.access_token
 WHERE expires_at < now() - interval '1 day'
@@ -207,6 +270,48 @@ DELETE FROM minecraft.server WHERE server_id = $1
 
 func (q *Queries) DeleteMCServer(ctx context.Context, serverID string) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteMCServer, serverID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteProfileTexture = `-- name: DeleteProfileTexture :execrows
+DELETE FROM minecraft.profile_texture
+WHERE profile_id = $1 AND type = $2::text
+`
+
+type DeleteProfileTextureParams struct {
+	ProfileID uuid.UUID `json:"profile_id"`
+	Type      string    `json:"type"`
+}
+
+func (q *Queries) DeleteProfileTexture(ctx context.Context, arg DeleteProfileTextureParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteProfileTexture, arg.ProfileID, arg.Type)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteTexture = `-- name: DeleteTexture :execrows
+DELETE FROM minecraft.texture WHERE hash = $1
+`
+
+func (q *Queries) DeleteTexture(ctx context.Context, hash string) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteTexture, hash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const dropTextureReference = `-- name: DropTextureReference :execrows
+UPDATE minecraft.texture SET ref_count = greatest(ref_count - 1, 0) WHERE hash = $1
+`
+
+func (q *Queries) DropTextureReference(ctx context.Context, hash string) (int64, error) {
+	result, err := q.db.Exec(ctx, dropTextureReference, hash)
 	if err != nil {
 		return 0, err
 	}
@@ -250,6 +355,39 @@ func (q *Queries) GetActiveMCSigningKey(ctx context.Context) (MinecraftSigningKe
 		&i.Status,
 		&i.CreatedAt,
 		&i.RetiredAt,
+	)
+	return i, err
+}
+
+const getAvatar = `-- name: GetAvatar :one
+
+SELECT profile_id, hash, rendered_at FROM minecraft.avatar WHERE profile_id = $1
+`
+
+// ---------------------------------------------------------------- 头像缓存
+func (q *Queries) GetAvatar(ctx context.Context, profileID uuid.UUID) (MinecraftAvatar, error) {
+	row := q.db.QueryRow(ctx, getAvatar, profileID)
+	var i MinecraftAvatar
+	err := row.Scan(&i.ProfileID, &i.Hash, &i.RenderedAt)
+	return i, err
+}
+
+const getExternalBinding = `-- name: GetExternalBinding :one
+SELECT id, profile_id, provider, external_user_id, base_url, enabled, created_at, updated_at FROM minecraft.external_binding WHERE profile_id = $1
+`
+
+func (q *Queries) GetExternalBinding(ctx context.Context, profileID uuid.UUID) (MinecraftExternalBinding, error) {
+	row := q.db.QueryRow(ctx, getExternalBinding, profileID)
+	var i MinecraftExternalBinding
+	err := row.Scan(
+		&i.ID,
+		&i.ProfileID,
+		&i.Provider,
+		&i.ExternalUserID,
+		&i.BaseUrl,
+		&i.Enabled,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -454,6 +592,57 @@ func (q *Queries) GetProfileByUUID(ctx context.Context, argUuid uuid.UUID) (Mine
 	return i, err
 }
 
+const getProfileTexture = `-- name: GetProfileTexture :one
+
+SELECT t.id, t.hash, t.type, t.size, t.width, t.height, t.mime, t.ref_count, t.created_at, t.updated_at, t.last_used_at, pt.type AS bound_type, pt.profile_id AS bound_profile
+FROM minecraft.profile_texture pt
+JOIN minecraft.texture t ON t.id = pt.texture_id
+WHERE pt.profile_id = $1 AND pt.type = $2::text
+`
+
+type GetProfileTextureParams struct {
+	ProfileID uuid.UUID `json:"profile_id"`
+	Type      string    `json:"type"`
+}
+
+type GetProfileTextureRow struct {
+	ID           uuid.UUID `json:"id"`
+	Hash         string    `json:"hash"`
+	Type         string    `json:"type"`
+	Size         int32     `json:"size"`
+	Width        int32     `json:"width"`
+	Height       int32     `json:"height"`
+	Mime         string    `json:"mime"`
+	RefCount     int32     `json:"ref_count"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	LastUsedAt   time.Time `json:"last_used_at"`
+	BoundType    string    `json:"bound_type"`
+	BoundProfile uuid.UUID `json:"bound_profile"`
+}
+
+// ---------------------------------------------------------------- 材质绑定
+func (q *Queries) GetProfileTexture(ctx context.Context, arg GetProfileTextureParams) (GetProfileTextureRow, error) {
+	row := q.db.QueryRow(ctx, getProfileTexture, arg.ProfileID, arg.Type)
+	var i GetProfileTextureRow
+	err := row.Scan(
+		&i.ID,
+		&i.Hash,
+		&i.Type,
+		&i.Size,
+		&i.Width,
+		&i.Height,
+		&i.Mime,
+		&i.RefCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.LastUsedAt,
+		&i.BoundType,
+		&i.BoundProfile,
+	)
+	return i, err
+}
+
 const getReusableNameConflict = `-- name: GetReusableNameConflict :one
 SELECT id, profile_id, name, changed_at, reusable_at FROM minecraft.name_history
 WHERE lower(name) = lower($1)
@@ -495,6 +684,31 @@ func (q *Queries) GetServerSession(ctx context.Context, serverID string) (Minecr
 	return i, err
 }
 
+const getTextureByHash = `-- name: GetTextureByHash :one
+
+SELECT id, hash, type, size, width, height, mime, ref_count, created_at, updated_at, last_used_at FROM minecraft.texture WHERE hash = $1
+`
+
+// ---------------------------------------------------------------- 纹理
+func (q *Queries) GetTextureByHash(ctx context.Context, hash string) (MinecraftTexture, error) {
+	row := q.db.QueryRow(ctx, getTextureByHash, hash)
+	var i MinecraftTexture
+	err := row.Scan(
+		&i.ID,
+		&i.Hash,
+		&i.Type,
+		&i.Size,
+		&i.Width,
+		&i.Height,
+		&i.Mime,
+		&i.RefCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.LastUsedAt,
+	)
+	return i, err
+}
+
 const insertNameHistory = `-- name: InsertNameHistory :one
 
 INSERT INTO minecraft.name_history (profile_id, name, reusable_at)
@@ -520,6 +734,50 @@ func (q *Queries) InsertNameHistory(ctx context.Context, arg InsertNameHistoryPa
 		&i.ReusableAt,
 	)
 	return i, err
+}
+
+const listGarbageTextures = `-- name: ListGarbageTextures :many
+SELECT id, hash, type, size, width, height, mime, ref_count, created_at, updated_at, last_used_at FROM minecraft.texture
+WHERE ref_count = 0 AND last_accessed_at < now() - $1::interval
+LIMIT $2::int
+`
+
+type ListGarbageTexturesParams struct {
+	Grace pgtype.Interval `json:"grace"`
+	Batch int32           `json:"batch"`
+}
+
+// 回收候选:引用计数归零且超过保留期的纹理。
+func (q *Queries) ListGarbageTextures(ctx context.Context, arg ListGarbageTexturesParams) ([]MinecraftTexture, error) {
+	rows, err := q.db.Query(ctx, listGarbageTextures, arg.Grace, arg.Batch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MinecraftTexture{}
+	for rows.Next() {
+		var i MinecraftTexture
+		if err := rows.Scan(
+			&i.ID,
+			&i.Hash,
+			&i.Type,
+			&i.Size,
+			&i.Width,
+			&i.Height,
+			&i.Mime,
+			&i.RefCount,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.LastUsedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listMCServers = `-- name: ListMCServers :many
@@ -670,6 +928,35 @@ func (q *Queries) ListPendingServerSessionsBefore(ctx context.Context, arg ListP
 			&i.JoinedAt,
 			&i.VerifiedAt,
 			&i.DisconnectedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProfileTextures = `-- name: ListProfileTextures :many
+SELECT profile_id, texture_id, type, updated_at FROM minecraft.profile_texture WHERE profile_id = $1
+`
+
+func (q *Queries) ListProfileTextures(ctx context.Context, profileID uuid.UUID) ([]MinecraftProfileTexture, error) {
+	rows, err := q.db.Query(ctx, listProfileTextures, profileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MinecraftProfileTexture{}
+	for rows.Next() {
+		var i MinecraftProfileTexture
+		if err := rows.Scan(
+			&i.ProfileID,
+			&i.TextureID,
+			&i.Type,
+			&i.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -846,6 +1133,15 @@ func (q *Queries) RotateMCAccessToken(ctx context.Context, arg RotateMCAccessTok
 	return i, err
 }
 
+const touchTexture = `-- name: TouchTexture :exec
+UPDATE minecraft.texture SET last_accessed_at = now() WHERE hash = $1
+`
+
+func (q *Queries) TouchTexture(ctx context.Context, hash string) error {
+	_, err := q.db.Exec(ctx, touchTexture, hash)
+	return err
+}
+
 const updateMCServer = `-- name: UpdateMCServer :one
 UPDATE minecraft.server
 SET name = $1, shared_secret = $2,
@@ -879,4 +1175,77 @@ func (q *Queries) UpdateMCServer(ctx context.Context, arg UpdateMCServerParams) 
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const upsertAvatar = `-- name: UpsertAvatar :exec
+INSERT INTO minecraft.avatar (profile_id, hash)
+VALUES ($1, $2::text)
+ON CONFLICT (profile_id) DO UPDATE
+SET hash = EXCLUDED.hash, rendered_at = now()
+`
+
+type UpsertAvatarParams struct {
+	ProfileID uuid.UUID `json:"profile_id"`
+	Hash      string    `json:"hash"`
+}
+
+// 表里**不存图像**,只存「这张头像是从哪份皮肤渲染出来的」。
+//
+// 图像本身在 storage 的 avatars/<profile_uuid>.png。这样分是因为
+// 图像是二进制大对象,进数据库会让一次 SELECT 拖上几 MB;
+// 而这里需要的只是「缓存是否失效」这一个判断。
+func (q *Queries) UpsertAvatar(ctx context.Context, arg UpsertAvatarParams) error {
+	_, err := q.db.Exec(ctx, upsertAvatar, arg.ProfileID, arg.Hash)
+	return err
+}
+
+const upsertExternalBinding = `-- name: UpsertExternalBinding :exec
+INSERT INTO minecraft.external_binding (profile_id, provider, external_user_id, base_url, enabled)
+VALUES ($1, $2::text, $3::text,
+        $4::text, $5::boolean)
+ON CONFLICT (profile_id) DO UPDATE
+SET provider = EXCLUDED.provider, external_user_id = EXCLUDED.external_user_id,
+    base_url = EXCLUDED.base_url, enabled = EXCLUDED.enabled, updated_at = now()
+`
+
+type UpsertExternalBindingParams struct {
+	ProfileID      uuid.UUID `json:"profile_id"`
+	Provider       string    `json:"provider"`
+	ExternalUserID string    `json:"external_user_id"`
+	BaseUrl        string    `json:"base_url"`
+	Enabled        bool      `json:"enabled"`
+}
+
+// 一个 profile 只绑定一个外部站(profile_id 上有唯一约束),
+// 所以按 profile_id 冲突消解,而不是按 (profile_id, kind)。
+//
+// base_url 存进数据而不是只读配置:玩家指向自建镜像时不需要重启服务。
+func (q *Queries) UpsertExternalBinding(ctx context.Context, arg UpsertExternalBindingParams) error {
+	_, err := q.db.Exec(ctx, upsertExternalBinding,
+		arg.ProfileID,
+		arg.Provider,
+		arg.ExternalUserID,
+		arg.BaseUrl,
+		arg.Enabled,
+	)
+	return err
+}
+
+const upsertProfileTexture = `-- name: UpsertProfileTexture :exec
+INSERT INTO minecraft.profile_texture (profile_id, texture_id, type)
+VALUES ($1, $2, $3::text)
+ON CONFLICT (profile_id, type) DO UPDATE
+SET texture_id = EXCLUDED.texture_id, updated_at = now()
+RETURNING texture_id
+`
+
+type UpsertProfileTextureParams struct {
+	ProfileID uuid.UUID `json:"profile_id"`
+	TextureID uuid.UUID `json:"texture_id"`
+	Type      string    `json:"type"`
+}
+
+func (q *Queries) UpsertProfileTexture(ctx context.Context, arg UpsertProfileTextureParams) error {
+	_, err := q.db.Exec(ctx, upsertProfileTexture, arg.ProfileID, arg.TextureID, arg.Type)
+	return err
 }

@@ -32,12 +32,20 @@ type OIDCDeps struct {
 
 // MCDeps 是游戏域的依赖。
 type MCDeps struct {
+	// Service 是 MC 认证域的主服务
 	Service *minecraft.Service
+	// Handler 是 Yggdrasil 协议端点
 	Handler *minecraft.Handler
 	// Keys 是 MC 域独立的签名密钥管理器(kid 前缀 mc-)
 	Keys *keys.Manager
 	// AccountAPI 是账号侧的 MC 管理端点
 	AccountAPI *minecraft.AccountAPIHandler
+	// Avatars 是头像渲染服务
+	Avatars *minecraft.AvatarService
+	// Textures 是皮肤与头像端点
+	Textures *minecraft.TextureHandler
+	// TextureService 供后台任务使用(垃圾回收)
+	TextureService *minecraft.TextureService
 }
 
 // AdminDeps 是管理后台的依赖。

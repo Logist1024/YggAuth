@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/yggauth/yggauth/internal/platform/clock"
 	"github.com/yggauth/yggauth/internal/platform/db/testdb"
 	"github.com/yggauth/yggauth/internal/platform/keys"
+	"github.com/yggauth/yggauth/internal/platform/storage"
 	"github.com/yggauth/yggauth/internal/transport"
 )
 
@@ -51,6 +53,9 @@ type env struct {
 	svc     *minecraft.Service
 	clk     *clock.Mock
 	keys    *keys.Manager
+	// textureDir 是皮肤存储根,用于断言去重后磁盘上的文件数
+	textureDir string
+	textures   *minecraft.TextureService
 }
 
 func testConfig() *config.Config {
@@ -73,7 +78,23 @@ func testConfig() *config.Config {
 	}
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T) *env { return newEnvWith(t, false) }
+
+// newEnvReadOnly 造一个只读模式的皮肤站。
+func newEnvReadOnly(t *testing.T) *env { return newEnvWith(t, true) }
+
+// newEnvWith 装配一个测试环境。
+func newEnvWith(t *testing.T, readOnly bool) *env {
+	t.Helper()
+	return newEnvWithStorage(t, readOnly, "")
+}
+
+// newEnvWithStorage 额外指定皮肤存储根。
+//
+// 复用同一个存储根的场景:先在可写环境里上传,再切到只读环境,
+// 验证只读只挡上传、不挡下载。用一个全新的临时目录会
+// 让下载测试因为「文件根本没在这台机器上」而通过,证明不了任何事。
+func newEnvWithStorage(t *testing.T, readOnly bool, textureDir string) *env {
 	t.Helper()
 
 	pool := testdb.Fresh(t)
@@ -81,6 +102,10 @@ func newEnv(t *testing.T) *env {
 	// 模拟时钟与数据库时钟差太远会让「刚签发的令牌」立刻显得过期。
 	clk := clock.NewMock(time.Now())
 	cfg := testConfig()
+
+	if textureDir == "" {
+		textureDir = t.TempDir()
+	}
 
 	identitySvc := identity.New(identity.Deps{
 		Accounts: account.NewPgRepository(pool),
@@ -116,7 +141,41 @@ func newEnv(t *testing.T) *env {
 	// 密钥解析器要指向服务自己:登记在册的服务器密钥必须优先于兜底密钥。
 	svc.WithSecretResolver(svc.ResolveSecret)
 
-	// OIDC 也要装上:令牌隔离测试需要「两个域都在」才有意义。
+	// ---- 皮肤站
+	textureStore, err := storage.NewLocal(storage.LocalOptions{Root: textureDir})
+	require.NoError(t, err)
+	avatarStore, err := storage.NewLocal(storage.LocalOptions{Root: filepath.Join(textureDir, "avatars")})
+	require.NoError(t, err)
+
+	textureService := minecraft.NewTextureService(pool, textureStore, clk,
+		minecraft.TextureOptions{Storage: textureStore, MaxSize: 2 << 20, ReadOnly: readOnly},
+		nil)
+
+	avatarService := minecraft.NewAvatarService(pool, avatarStore, textureService, minecraft.AvatarOptions{
+		QueueSize: 64, DefaultSize: 64, Workers: 2, Logger: nopLogger{},
+	})
+	t.Cleanup(avatarService.Close)
+
+	mcHandler := minecraft.NewHandler(minecraft.HandlerDeps{
+		Service:      svc,
+		Issuer:       cfg.App.BaseURL(),
+		SkinDomain:   cfg.App.BaseURL(),
+		PublicKeyPEM: minecraft.PublicKeyPEM(mcKeys),
+	})
+
+	textureHandler := minecraft.NewTextureHandler(minecraft.TextureHandlerDeps{
+		Service:     textureService,
+		MainService: svc,
+		Avatars:     avatarService,
+		Profiles:    svc,
+		URLBase:     cfg.App.BaseURL(),
+		MaxSize:     2 << 20,
+		ReadOnly:    readOnly,
+	})
+
+	// ---- OIDC
+	//
+	// 也要装上:令牌隔离测试需要「两个域都在」才有意义。
 	// 只装 MC 再拿 MC 令牌打 /oauth 得到的是 404,证明不了任何隔离性。
 	oidcKeys, err := keys.NewManager(keys.Options{
 		MasterSecret: cfg.OIDC.KeyMasterSecret,
@@ -151,25 +210,30 @@ func newEnv(t *testing.T) *env {
 				Name: "ygg_session", Secure: false, SameSite: http.SameSiteLaxMode, IdleTTL: 168 * time.Hour,
 			}, testIssuer),
 		},
+		MC: transport.MCDeps{
+			Service:        svc,
+			Handler:        mcHandler,
+			Keys:           mcKeys,
+			AccountAPI:     minecraft.NewAccountAPIHandler(svc),
+			Avatars:        avatarService,
+			Textures:       textureHandler,
+			TextureService: textureService,
+		},
 		OIDC: transport.OIDCDeps{
 			Server:  oidcServer,
 			Handler: oidcHandler,
 			SSO:     oidc.NewSSO(oidcHandler),
 		},
-		MC: transport.MCDeps{
-			Service:    svc,
-			Keys:       mcKeys,
-			AccountAPI: minecraft.NewAccountAPIHandler(svc),
-			Handler: minecraft.NewHandler(minecraft.HandlerDeps{
-				Service:      svc,
-				Issuer:       cfg.App.BaseURL(),
-				SkinDomain:   cfg.App.BaseURL(),
-				PublicKeyPEM: minecraft.PublicKeyPEM(mcKeys),
-			}),
-		},
 	}).Handler()
 
-	return &env{handler: handler, svc: svc, clk: clk, keys: mcKeys}
+	return &env{
+		handler:    handler,
+		svc:        svc,
+		clk:        clk,
+		keys:       mcKeys,
+		textureDir: textureDir,
+		textures:   textureService,
+	}
 }
 
 // post 发起一次 JSON POST。
@@ -305,3 +369,33 @@ func sha1Hex(in string) string {
 
 // toUpper 供「uuid 大写」用例使用。
 func toUpper(in string) string { return strings.ToUpper(in) }
+
+// webLogin 注册账号、验证邮箱并登录,返回会话 cookie。
+//
+// **不**碰 MC 档案:测试里大多数用例要的是「一个已登录的浏览器会话」,
+// 而 MC 档案要等用户走过 /mc/authenticate 才存在。顺手在这里查档案
+// 会让整条链在第一次 MC 登录之前就失败。
+func webLogin(t *testing.T, e *env, username, password string) *http.Cookie {
+	t.Helper()
+
+	registerAndVerify(t, e, username, password)
+
+	// 顺手走一次 MC 登录:纹理绑定挂在 MC 档案上,
+	// 而档案要等 /mc/authenticate 才建出来。少这一步,
+	// 后续所有材质接口都会以「尚未绑定」拒绝。
+	e.authenticate(t, username, password, "web-login")
+
+	rec := e.post(t, "/api/auth/login", map[string]string{
+		"email":    username + "@example.com",
+		"password": password,
+	}, "")
+	require.Equal(t, http.StatusOK, rec.Code, "登录失败: %s", rec.Body.String())
+
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "ygg_session" {
+			return c
+		}
+	}
+	t.Fatal("登录成功但没有下发会话 cookie")
+	return nil
+}

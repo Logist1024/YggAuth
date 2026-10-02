@@ -300,3 +300,9 @@ func (s *Service) UpdateServer(ctx context.Context, serverID, name, secret strin
 	}
 	return serverFromRow(row), nil
 }
+
+// Logger 是 MC 域用到的日志器最小接口。
+type Logger interface {
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}

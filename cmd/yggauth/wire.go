@@ -22,6 +22,7 @@ import (
 	"github.com/yggauth/yggauth/internal/platform/keys"
 	"github.com/yggauth/yggauth/internal/platform/mailer"
 	"github.com/yggauth/yggauth/internal/platform/ratelimit"
+	"github.com/yggauth/yggauth/internal/platform/storage"
 
 	"github.com/yggauth/yggauth/internal/transport"
 )
@@ -138,6 +139,37 @@ func buildDeps(cfg *config.Config, logger *slog.Logger, pool *db.Pool) transport
 		NameRetentionDays: cfg.MC.NameRetentionDays,
 	})
 	mcService.WithSecretResolver(mcServiceResolver(pool))
+	mcService.WithSecretResolver(mcServiceResolver(pool))
+
+	// ---- 皮肤站
+	//
+	// 纹理与头像用各自的存储根:两者键空间不同,分开能让「清头像缓存」
+	// 这类运维操作不必误伤纹理文件。
+	textureStore, err := mcStorage(cfg, "textures")
+	if err != nil {
+		panic("初始化皮肤存储失败: " + err.Error())
+	}
+	avatarStore, err := mcStorage(cfg, "avatars")
+	if err != nil {
+		panic("初始化头像存储失败: " + err.Error())
+	}
+
+	textureService := mcTextureService(cfg, pool, textureStore, clk, loggerAdapter{logger})
+	avatarService := minecraft.NewAvatarService(pool, avatarStore, textureService, minecraft.AvatarOptions{
+		QueueSize:   cfg.MC.AvatarQueueSize,
+		DefaultSize: cfg.MC.AvatarSize,
+		Logger:      loggerAdapter{logger},
+	})
+
+	textureHandler := minecraft.NewTextureHandler(minecraft.TextureHandlerDeps{
+		Service:     textureService,
+		MainService: mcService,
+		Avatars:     avatarService,
+		Profiles:    mcService,
+		URLBase:     cfg.App.BaseURL(),
+		MaxSize:     cfg.MC.SkinMaxSize,
+		ReadOnly:    cfg.MC.ReadOnly,
+	})
 
 	mcHandler := minecraft.NewHandler(minecraft.HandlerDeps{
 		Service:      mcService,
@@ -165,10 +197,13 @@ func buildDeps(cfg *config.Config, logger *slog.Logger, pool *db.Pool) transport
 		DB:     pool,
 		Clock:  clk,
 		MC: transport.MCDeps{
-			Service:    mcService,
-			Handler:    mcHandler,
-			Keys:       mcKeys,
-			AccountAPI: minecraft.NewAccountAPIHandler(mcService),
+			Service:        mcService,
+			Handler:        mcHandler,
+			Keys:           mcKeys,
+			AccountAPI:     minecraft.NewAccountAPIHandler(mcService),
+			Avatars:        avatarService,
+			Textures:       textureHandler,
+			TextureService: textureService,
 		},
 		OIDC: transport.OIDCDeps{
 			Server:  oidcServer,
@@ -327,4 +362,47 @@ func mcGateway(identitySvc *identity.Service) minecraft.AccountGateway {
 			return acc.Username, nil
 		},
 	)
+}
+
+// 皮肤站相关服务的装配参数集中在下面,避免 wire.go 主体继续膨胀。
+
+// mcStorage 创建本地磁盘存储。
+//
+// 纹理与头像用**同一个** Local 实例、但各给一个子根:两者键空间
+// 不同(textures/<hash>.png 与 avatars/<uuid>.png),共用一个根也能工作,
+// 分开则让「清空头像缓存」这类运维操作不必误伤纹理。
+func mcStorage(cfg *config.Config, sub string) (*storage.Local, error) {
+	root := cfg.Storage.TextureDir
+	if sub == "avatars" {
+		root = cfg.Storage.AvatarDir
+	}
+	return storage.NewLocal(storage.LocalOptions{Root: root})
+}
+
+// mcTextureService 装配纹理服务。
+func mcTextureService(cfg *config.Config, pool *db.Pool, store storage.Storage, clk clock.Clock, logger loggerAdapter) *minecraft.TextureService {
+	fetcher := minecraft.NewRemoteFetcher(minecraft.ExternalOptions{
+		Enabled:          cfg.MC.SkinExternal,
+		BaseURL:          externalSkinBaseURL(cfg),
+		Timeout:          cfg.MC.SkinExternalTimeout,
+		FailureThreshold: cfg.MC.SkinExternalFailures,
+		ResetTimeout:     cfg.MC.SkinExternalReset,
+		Logger:           logger,
+	})
+
+	return minecraft.NewTextureService(pool, store, clk, minecraft.TextureOptions{
+		Storage:      store,
+		MaxSize:      cfg.MC.SkinMaxSize,
+		ReadOnly:     cfg.MC.ReadOnly,
+		GarbageGrace: 7 * 24 * time.Hour,
+		Logger:       logger,
+	}, fetcher)
+}
+
+// externalSkinBaseURL 返回外部皮肤站地址。
+func externalSkinBaseURL(cfg *config.Config) string {
+	if cfg.MC.SkinExternalBaseURL != "" {
+		return cfg.MC.SkinExternalBaseURL
+	}
+	return cfg.App.BaseURL()
 }

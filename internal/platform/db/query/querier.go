@@ -14,6 +14,7 @@ import (
 
 type Querier interface {
 	AddRolePermission(ctx context.Context, arg AddRolePermissionParams) error
+	AddTextureReference(ctx context.Context, hash string) error
 	// 用户在浏览器端批准。approved 之前轮询令牌一律返回 authorization_pending。
 	ApproveDeviceCode(ctx context.Context, arg ApproveDeviceCodeParams) (OidcDeviceCode, error)
 	ConsumeDeviceCode(ctx context.Context, id uuid.UUID) (int64, error)
@@ -68,7 +69,9 @@ type Querier interface {
 	// 唯一索引,而同一条语句里的数据修改 CTE 对该索引的检查不可见 ——
 	// 合成一条会稳定撞上 duplicate key。
 	CreateSigningKey(ctx context.Context, arg CreateSigningKeyParams) (OidcSigningKey, error)
+	CreateTexture(ctx context.Context, arg CreateTextureParams) (MinecraftTexture, error)
 	DeleteAccount(ctx context.Context, id uuid.UUID) (int64, error)
+	DeleteAvatar(ctx context.Context, profileID uuid.UUID) (int64, error)
 	DeleteClient(ctx context.Context, clientID string) (int64, error)
 	DeleteConsent(ctx context.Context, arg DeleteConsentParams) (int64, error)
 	DeleteExpiredAccessTokens(ctx context.Context) (int64, error)
@@ -86,10 +89,13 @@ type Querier interface {
 	DeleteExpiredSessions(ctx context.Context) (int64, error)
 	DeleteMCServer(ctx context.Context, serverID string) (int64, error)
 	DeletePKCERequest(ctx context.Context, signature []byte) (int64, error)
+	DeleteProfileTexture(ctx context.Context, arg DeleteProfileTextureParams) (int64, error)
 	// 内置角色不可删。返回 0 行表示「角色不存在」或「是内置角色」,由服务层区分。
 	DeleteRole(ctx context.Context, id uuid.UUID) (int64, error)
 	DeleteSetting(ctx context.Context, key string) (int64, error)
+	DeleteTexture(ctx context.Context, hash string) (int64, error)
 	DenyDeviceCode(ctx context.Context, id uuid.UUID) (int64, error)
+	DropTextureReference(ctx context.Context, hash string) (int64, error)
 	// 导出 CSV 用:只按时间窗过滤,规模由调用方控制。
 	ExportAuditEvents(ctx context.Context, arg ExportAuditEventsParams) ([]IdentityAuditEvent, error)
 	// 把仍然有效期的旧名延长到新的保留期。改名链上可能有多个旧名,
@@ -108,6 +114,8 @@ type Querier interface {
 	// ---------------------------------------------------------------- 签名密钥
 	GetActiveSigningKey(ctx context.Context) (OidcSigningKey, error)
 	GetAuthorizationCodeByHash(ctx context.Context, codeHash []byte) (OidcAuthorizationCode, error)
+	// ---------------------------------------------------------------- 头像缓存
+	GetAvatar(ctx context.Context, profileID uuid.UUID) (MinecraftAvatar, error)
 	GetClient(ctx context.Context, clientID string) (OidcClient, error)
 	GetConsent(ctx context.Context, arg GetConsentParams) (OidcConsent, error)
 	GetCredential(ctx context.Context, arg GetCredentialParams) (IdentityCredential, error)
@@ -115,6 +123,7 @@ type Querier interface {
 	GetDeviceCodeByUserHash(ctx context.Context, userCodeHash []byte) (OidcDeviceCode, error)
 	// 只取未使用且未过期的。校验和标记使用在同一个事务里完成。
 	GetEmailTokenByHash(ctx context.Context, tokenHash []byte) (IdentityEmailToken, error)
+	GetExternalBinding(ctx context.Context, profileID uuid.UUID) (MinecraftExternalBinding, error)
 	GetInvitationByCode(ctx context.Context, code string) (IdentityInvitation, error)
 	// 邮件重发冷却:看最近一次发信时间。
 	GetLastEmailToken(ctx context.Context, arg GetLastEmailTokenParams) (IdentityEmailToken, error)
@@ -133,6 +142,8 @@ type Querier interface {
 	GetProfileByAccount(ctx context.Context, accountID uuid.UUID) (MinecraftProfile, error)
 	GetProfileByName(ctx context.Context, currentName string) (MinecraftProfile, error)
 	GetProfileByUUID(ctx context.Context, argUuid uuid.UUID) (MinecraftProfile, error)
+	// ---------------------------------------------------------------- 材质绑定
+	GetProfileTexture(ctx context.Context, arg GetProfileTextureParams) (GetProfileTextureRow, error)
 	GetRefreshTokenByHash(ctx context.Context, tokenHash []byte) (OidcRefreshToken, error)
 	GetRefreshTokenBySignature(ctx context.Context, signature []byte) (OidcRefreshToken, error)
 	// 查这个名字是否还在保留期内。reusable_at IS NULL 表示永久保留。
@@ -145,6 +156,8 @@ type Querier interface {
 	GetSessionBySSOID(ctx context.Context, ssoSessionID pgtype.UUID) ([]IdentitySession, error)
 	GetSetting(ctx context.Context, key string) (AppSetting, error)
 	GetSigningKey(ctx context.Context, kid string) (OidcSigningKey, error)
+	// ---------------------------------------------------------------- 纹理
+	GetTextureByHash(ctx context.Context, hash string) (MinecraftTexture, error)
 	GrantRole(ctx context.Context, arg GrantRoleParams) (IdentityAccountRole, error)
 	HasPermission(ctx context.Context, arg HasPermissionParams) (bool, error)
 	// 审计表只追加,应用层没有任何删除接口(见 docs/09-security.md 9.2)。
@@ -165,6 +178,8 @@ type Querier interface {
 	ListAccounts(ctx context.Context, arg ListAccountsParams) ([]IdentityAccount, error)
 	ListActiveSessions(ctx context.Context, accountID uuid.UUID) ([]IdentitySession, error)
 	ListClients(ctx context.Context, arg ListClientsParams) ([]OidcClient, error)
+	// 回收候选:引用计数归零且超过保留期的纹理。
+	ListGarbageTextures(ctx context.Context, arg ListGarbageTexturesParams) ([]MinecraftTexture, error)
 	ListInvitations(ctx context.Context, arg ListInvitationsParams) ([]ListInvitationsRow, error)
 	ListMCServers(ctx context.Context) ([]MinecraftServer, error)
 	ListMCSigningKeys(ctx context.Context) ([]MinecraftSigningKey, error)
@@ -181,6 +196,7 @@ type Querier interface {
 	// 顺带消除了「数据库时钟与进程时钟漂移」带来的判定不一致。
 	ListPendingServerSessionsBefore(ctx context.Context, arg ListPendingServerSessionsBeforeParams) ([]MinecraftServerSession, error)
 	ListPermissions(ctx context.Context) ([]IdentityPermission, error)
+	ListProfileTextures(ctx context.Context, profileID uuid.UUID) ([]MinecraftProfileTexture, error)
 	ListProfilesByAccount(ctx context.Context, accountID uuid.UUID) ([]MinecraftProfile, error)
 	ListRoleAccounts(ctx context.Context, roleID uuid.UUID) ([]IdentityAccount, error)
 	ListRolePermissions(ctx context.Context, roleID uuid.UUID) ([]IdentityPermission, error)
@@ -238,6 +254,7 @@ type Querier interface {
 	TouchDeviceCodePoll(ctx context.Context, id uuid.UUID) error
 	// 滑动过期:只推进 idle_expires_at,绝不改 expires_at(绝对过期不因活跃而延长)。
 	TouchSession(ctx context.Context, arg TouchSessionParams) (IdentitySession, error)
+	TouchTexture(ctx context.Context, hash string) error
 	// 只改展示层字段。username_lower 由服务层保证同步更新。
 	UpdateAccountProfile(ctx context.Context, arg UpdateAccountProfileParams) (IdentityAccount, error)
 	UpdateAccountStatus(ctx context.Context, arg UpdateAccountStatusParams) (IdentityAccount, error)
@@ -247,10 +264,22 @@ type Querier interface {
 	UpdateMCServer(ctx context.Context, arg UpdateMCServerParams) (MinecraftServer, error)
 	// is_system 的内置角色不允许改名改 code,避免破坏依赖角色 code 的脚本。
 	UpdateRole(ctx context.Context, arg UpdateRoleParams) (IdentityRole, error)
+	// 表里**不存图像**,只存「这张头像是从哪份皮肤渲染出来的」。
+	//
+	// 图像本身在 storage 的 avatars/<profile_uuid>.png。这样分是因为
+	// 图像是二进制大对象,进数据库会让一次 SELECT 拖上几 MB;
+	// 而这里需要的只是「缓存是否失效」这一个判断。
+	UpsertAvatar(ctx context.Context, arg UpsertAvatarParams) error
 	// ---------------------------------------------------------------- 同意记录
 	UpsertConsent(ctx context.Context, arg UpsertConsentParams) (OidcConsent, error)
 	// 每账号每算法一条(UNIQUE(account_id, algo)),支持多算法并存迁移。
 	UpsertCredential(ctx context.Context, arg UpsertCredentialParams) (IdentityCredential, error)
+	// 一个 profile 只绑定一个外部站(profile_id 上有唯一约束),
+	// 所以按 profile_id 冲突消解,而不是按 (profile_id, kind)。
+	//
+	// base_url 存进数据而不是只读配置:玩家指向自建镜像时不需要重启服务。
+	UpsertExternalBinding(ctx context.Context, arg UpsertExternalBindingParams) error
+	UpsertProfileTexture(ctx context.Context, arg UpsertProfileTextureParams) error
 	UpsertSetting(ctx context.Context, arg UpsertSettingParams) (AppSetting, error)
 }
 

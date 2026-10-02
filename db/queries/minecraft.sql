@@ -199,3 +199,88 @@ WHERE profile_id = sqlc.arg('profile_id')
   AND joined_at >= sqlc.arg('cutoff')::timestamptz
 ORDER BY joined_at DESC
 LIMIT 20;
+
+-- ---------------------------------------------------------------- 纹理
+
+-- name: GetTextureByHash :one
+SELECT * FROM minecraft.texture WHERE hash = sqlc.arg('hash');
+
+-- name: CreateTexture :one
+INSERT INTO minecraft.texture (hash, type, size, mime, width, height)
+VALUES (sqlc.arg('hash'), sqlc.arg('type')::text, sqlc.arg('size')::int,
+        sqlc.arg('mime')::text, sqlc.arg('width')::int, sqlc.arg('height')::int)
+RETURNING *;
+
+-- name: AddTextureReference :exec
+UPDATE minecraft.texture SET ref_count = ref_count + 1 WHERE hash = sqlc.arg('hash');
+
+-- name: DropTextureReference :execrows
+UPDATE minecraft.texture SET ref_count = greatest(ref_count - 1, 0) WHERE hash = sqlc.arg('hash');
+
+-- name: TouchTexture :exec
+UPDATE minecraft.texture SET last_accessed_at = now() WHERE hash = sqlc.arg('hash');
+
+-- name: ListGarbageTextures :many
+-- 回收候选:引用计数归零且超过保留期的纹理。
+SELECT * FROM minecraft.texture
+WHERE ref_count = 0 AND last_accessed_at < now() - sqlc.arg('grace')::interval
+LIMIT sqlc.arg('batch')::int;
+
+-- name: DeleteTexture :execrows
+DELETE FROM minecraft.texture WHERE hash = sqlc.arg('hash');
+
+-- ---------------------------------------------------------------- 材质绑定
+
+-- name: GetProfileTexture :one
+SELECT t.*, pt.type AS bound_type, pt.profile_id AS bound_profile
+FROM minecraft.profile_texture pt
+JOIN minecraft.texture t ON t.id = pt.texture_id
+WHERE pt.profile_id = sqlc.arg('profile_id') AND pt.type = sqlc.arg('type')::text;
+
+-- name: ListProfileTextures :many
+SELECT * FROM minecraft.profile_texture WHERE profile_id = sqlc.arg('profile_id');
+
+-- name: UpsertProfileTexture :exec
+INSERT INTO minecraft.profile_texture (profile_id, texture_id, type)
+VALUES (sqlc.arg('profile_id'), sqlc.arg('texture_id'), sqlc.arg('type')::text)
+ON CONFLICT (profile_id, type) DO UPDATE
+SET texture_id = EXCLUDED.texture_id, updated_at = now()
+RETURNING texture_id;
+
+-- name: DeleteProfileTexture :execrows
+DELETE FROM minecraft.profile_texture
+WHERE profile_id = sqlc.arg('profile_id') AND type = sqlc.arg('type')::text;
+
+-- ---------------------------------------------------------------- 头像缓存
+
+-- name: GetAvatar :one
+SELECT * FROM minecraft.avatar WHERE profile_id = sqlc.arg('profile_id');
+
+-- name: UpsertAvatar :exec
+-- 表里**不存图像**,只存「这张头像是从哪份皮肤渲染出来的」。
+--
+-- 图像本身在 storage 的 avatars/<profile_uuid>.png。这样分是因为
+-- 图像是二进制大对象,进数据库会让一次 SELECT 拖上几 MB;
+-- 而这里需要的只是「缓存是否失效」这一个判断。
+INSERT INTO minecraft.avatar (profile_id, hash)
+VALUES (sqlc.arg('profile_id'), sqlc.arg('hash')::text)
+ON CONFLICT (profile_id) DO UPDATE
+SET hash = EXCLUDED.hash, rendered_at = now();
+
+-- name: DeleteAvatar :execrows
+DELETE FROM minecraft.avatar WHERE profile_id = sqlc.arg('profile_id');
+
+-- name: GetExternalBinding :one
+SELECT * FROM minecraft.external_binding WHERE profile_id = sqlc.arg('profile_id');
+
+-- name: UpsertExternalBinding :exec
+-- 一个 profile 只绑定一个外部站(profile_id 上有唯一约束),
+-- 所以按 profile_id 冲突消解,而不是按 (profile_id, kind)。
+--
+-- base_url 存进数据而不是只读配置:玩家指向自建镜像时不需要重启服务。
+INSERT INTO minecraft.external_binding (profile_id, provider, external_user_id, base_url, enabled)
+VALUES (sqlc.arg('profile_id'), sqlc.arg('provider')::text, sqlc.arg('external_user_id')::text,
+        sqlc.arg('base_url')::text, sqlc.arg('enabled')::boolean)
+ON CONFLICT (profile_id) DO UPDATE
+SET provider = EXCLUDED.provider, external_user_id = EXCLUDED.external_user_id,
+    base_url = EXCLUDED.base_url, enabled = EXCLUDED.enabled, updated_at = now();

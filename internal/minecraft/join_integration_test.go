@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/yggauth/yggauth/internal/minecraft"
 )
 
 // joinFlow 走完 join → 算出签名,返回签名与玩家 UUID。
@@ -298,6 +296,3 @@ func TestServerListNeverLeaksSharedSecret(t *testing.T) {
 	require.NotContains(t, string(raw), "绝不能泄露的密钥",
 		"sharedSecret 是对端认证的唯一凭据,列表响应里绝不能出现")
 }
-
-// 编译期确认协议常量被引用。
-var _ = minecraft.ErrCodeBadSignature

@@ -205,6 +205,10 @@ func (a App) Addr() string { return fmt.Sprintf("%s:%d", a.Host, a.Port) }
 func (a App) BaseURL() string { return strings.TrimRight(a.PublicBaseURL, "/") }
 
 // Storage 是文件存储配置。
+// Storage 是运行时文件布局。
+//
+// 三个目录各自独立:纹理、头像、备份的清理策略与保留期都不同,
+// 混在一个目录下就没法只回收其中一类。
 type Storage struct {
 	// TextureDir 是皮肤/披风目录,布局为 <sha256前2位>/<sha256>.png
 	TextureDir string
@@ -296,6 +300,8 @@ type MC struct {
 	SkinExternal bool
 	// SkinExternalTimeout 是外部皮肤站调用超时
 	SkinExternalTimeout time.Duration
+	// SkinExternalBaseURL 是外部皮肤站地址,默认取本服务的公开基址
+	SkinExternalBaseURL string
 	// SkinExternalFailures 是熔断阈值:连续失败达该次数后短路
 	SkinExternalFailures int
 	// SkinExternalReset 是熔断半开等待时长
@@ -433,6 +439,7 @@ func Load() (*Config, error) {
 			ReadOnly:             r.boolVal("MC_READONLY", false),
 			SkinExternal:         r.boolVal("MC_SKIN_EXTERNAL", false),
 			SkinExternalTimeout:  r.duration("MC_SKIN_EXTERNAL_TIMEOUT", 5*time.Second),
+			SkinExternalBaseURL:  r.str("MC_SKIN_EXTERNAL_BASE_URL", ""),
 			SkinExternalFailures: r.intBetween("MC_SKIN_EXTERNAL_FAILURES", 5, 1, 100),
 			SkinExternalReset:    r.duration("MC_SKIN_EXTERNAL_RESET", 60*time.Second),
 			ServerSharedSecret:   r.str("MC_SERVER_SHARED_SECRET", ""),
@@ -463,9 +470,18 @@ func Load() (*Config, error) {
 		},
 	}
 
-	cfg.Storage.TextureDir = joinDataDir(cfg.App.DataDir, "textures")
-	cfg.Storage.AvatarDir = joinDataDir(cfg.App.DataDir, "avatars")
-	cfg.Storage.BackupDir = joinDataDir(cfg.App.DataDir, "backups")
+	// 只在没显式配置时才推导默认值。
+	// 无条件覆盖会让 TEXTURE_DIR 变成一个读了没用的环境变量 ——
+	// 运维设了它却没有任何效果,排查起来相当费时。
+	if cfg.Storage.TextureDir == "" {
+		cfg.Storage.TextureDir = joinDataDir(cfg.App.DataDir, "textures")
+	}
+	if cfg.Storage.AvatarDir == "" {
+		cfg.Storage.AvatarDir = joinDataDir(cfg.App.DataDir, "avatars")
+	}
+	if cfg.Storage.BackupDir == "" {
+		cfg.Storage.BackupDir = joinDataDir(cfg.App.DataDir, "backups")
+	}
 
 	cfg.validate(r.col)
 	if err := r.col.err(); err != nil {

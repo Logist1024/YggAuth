@@ -398,3 +398,42 @@ GET /mc/avatar/<uuidOrName>?size=64&hd=false
 - `validate` 有效 → `204`;无效 → `403`
 - `invalidate` / `signout` → `204`
 - 其他错误 → `403` + Yggdrasil 错误体
+
+### 4.4 皮肤站端点(M5)
+
+**协议前缀(公开)**
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/mc/textures/:hash` | 按内容哈希下载,`Cache-Control: immutable` |
+| GET | `/mc/skin/:uuidOrName` | 按玩家取皮肤,缺失时回源或 404 |
+| GET | `/mc/avatar/:uuidOrName?size=64` | 头像,**永远 200** |
+
+`hash` 必须是 64 位十六进制;`uuidOrName` 同时接受带横线与不带横线的 UUID。
+不接受两者时按玩家名解析。
+
+头像接口**永远返回 200**:MC 客户端在头像加载失败时会持续重试,
+404 只会让它反复打过来。降级头像让请求安静结束。
+
+首次请求头像时立刻返回默认头像并把渲染任务丢进有界队列;
+渲染完成后写入缓存。队列满时直接丢弃任务,**不阻塞** ——
+阻塞等于把「渲染慢」变成「整个皮肤站不可用」。
+
+**账号前缀(需会话)**
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/account/mc/texture?type=skin` | 查询当前材质 |
+| PUT | `/api/account/mc/texture?type=skin` | 上传,body 为 PNG 原始字节 |
+| DELETE | `/api/account/mc/texture/:type` | 删除材质 |
+
+上传校验:PNG 魔数 → 完整解码 → 尺寸合法(skin 64×64 或 64×32,cape 64×32)→ 体积上限。
+
+体积检查用 `LimitReader` 在**读取时**限流。不这么做的话,一个 2GB 的上传会先被
+完整读进内存再被拒绝 —— 那正是「大文件拖垮请求处理」。
+
+响应里 `deduplicated` 为真表示这份内容此前已存在,本次只增加了引用计数。
+
+`MC_READONLY=true` 时上传返回 403,下载不受影响。
+只读是运维的止血开关;若连下载一起关,故障就从「玩家换不了皮肤」
+升级成「所有人的皮肤全挂」。

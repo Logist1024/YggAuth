@@ -108,6 +108,9 @@ func (rt *Router) Handler() http.Handler {
 			if rt.deps.MC.AccountAPI != nil {
 				rt.deps.MC.AccountAPI.Mount(&accountRoutes{r})
 			}
+			if rt.deps.MC.Textures != nil {
+				rt.deps.MC.Textures.MountAccount(&accountRoutes{r})
+			}
 			if rt.deps.Admin.Handler != nil {
 				rt.deps.Admin.Handler.Mount(r)
 			}
@@ -124,7 +127,12 @@ func (rt *Router) Handler() http.Handler {
 	// authlib-injector 与 MC 客户端都是机器对机器调用,
 	// 同样不会为了发一次请求先取 CSRF token。
 	if rt.deps.MC.Handler != nil {
-		r.Route("/mc", rt.deps.MC.Handler.Mount)
+		r.Route("/mc", func(r chi.Router) {
+			rt.deps.MC.Handler.Mount(r)
+			if rt.deps.MC.Textures != nil {
+				rt.deps.MC.Textures.MountTexture(r)
+			}
+		})
 	}
 
 	// /oauth 同样不套 CSRF:标准 OAuth 客户端不会、也不该
@@ -215,3 +223,11 @@ func (a *accountRoutes) Patch(pattern string, h http.HandlerFunc) {
 
 // Post 注册 POST 路由。
 func (a *accountRoutes) Post(pattern string, h http.HandlerFunc) { a.r.Post("/account/mc"+pattern, h) }
+
+// Put 注册 PUT 路由。
+func (a *accountRoutes) Put(pattern string, h http.HandlerFunc) { a.r.Put("/account/mc"+pattern, h) }
+
+// Delete 注册 DELETE 路由。
+func (a *accountRoutes) Delete(pattern string, h http.HandlerFunc) {
+	a.r.Delete("/account/mc"+pattern, h)
+}
