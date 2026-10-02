@@ -50,99 +50,104 @@ docker compose up -d --build
 
 ## 三、Dockerfile
 
-多阶段构建,运行镜像用 distroless:
+三阶段构建:Node 构建前端 → Go 编译二进制 → distroless 运行。
 
 ```dockerfile
-# ---------- 前端构建 ----------
+# ---------- 前端 ----------
 FROM node:24-alpine AS web
-WORKDIR /web
-RUN corepack enable && corepack prepare pnpm@10 --activate
-COPY web/package.json web/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
+WORKDIR /src/web
+COPY web/package.json web/pnpm-workspace.yaml web/pnpm-lock.yaml ./
+COPY web/shared/package.json ./shared/
+COPY web/apps/account/package.json ./apps/account/
+COPY web/apps/admin/package.json ./apps/admin/
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 COPY web/ ./
+COPY tsconfig.base.json ./tsconfig.base.json
 RUN pnpm build
 
-# ---------- Go 构建 ----------
+# ---------- Go ----------
 FROM golang:1.27-alpine AS build
-RUN apk add --no-cache git
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,id=gomod,target=/go/pkg/mod go mod download
 COPY . .
-COPY --from=web /web/dist ./web/dist
-RUN CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags="-s -w" -o /out/yggauth ./cmd/yggauth
+COPY --from=web /src/internal/webserver/dist ./internal/webserver/dist
+RUN --mount=type=cache,id=gocache,target=/root/.cache/go-build \
+    --mount=type=cache,id=gomod,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath \
+      -ldflags="-s -w -X main.version=${VERSION}" -o /out/yggauth ./cmd/yggauth
 
 # ---------- 运行 ----------
 FROM gcr.io/distroless/static-debian12:nonroot
-WORKDIR /app
-COPY --from=build /out/yggauth /app/yggauth
-COPY --from=build /src/db/migrations /app/db/migrations
-USER nonroot:nonroot
+COPY --from=build --chown=nonroot:nonroot /out/yggauth /usr/local/bin/yggauth
+COPY --from=build /usr/local/go/lib/time/zoneinfo /usr/share/zoneinfo
+ENV TZ=Asia/Shanghai DATA_DIR=/data APP_HOST=0.0.0.0 APP_PORT=3000
+VOLUME ["/data"]
 EXPOSE 3000
-ENTRYPOINT ["/app/yggauth"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD ["/usr/local/bin/yggauth", "healthcheck"]
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/yggauth"]
+CMD ["serve"]
 ```
 
 **关键点**:
-- `CGO_ENABLED=0` —— 静态编译,镜像无需 libc
-- distroless 基础镜像 —— 无 shell、无包管理器,攻击面小
-- 迁移 SQL 随镜像分发,启动时自动执行
-- 前端产物从 `web` 阶段拷贝,**必须重建 Go** 才能更新(ADR-006 的代价)
+- **三个阶段**:pnpm 的依赖树有几百 MB,与最终镜像无关。装进 Go 阶段会让镜像大出一个数量级。
+- **产物直接构建到 `internal/webserver/dist/`**:`go:embed` 只能读取包目录内的文件。
+  Vite 的 `outDir` 用相对 URL 计算(`../../../internal/webserver/dist/<name>`),不写死绝对路径。
+- `CGO_ENABLED=0` —— 静态编译,镜像无需 libc。
+- distroless —— 无 shell、无包管理器,攻击面小。
+- **时区数据单独 COPY**:distroless 刻意不带这些,缺了会让邮件时间戳与审计日志全变成 UTC。
+- **健康检查用二进制自身**(`/usr/local/bin/yggauth healthcheck`):
+  distroless 没有 shell 或 curl,探针必须是可执行文件本身。
+  它查的是 `/health/ready` 而不是「进程还在」—— 数据库连不上时
+  进程还活着,但处理不了任何请求,那时候算「健康」是误导。
+- `USER nonroot:nonroot` —— 皮肤文件由本进程写入,所以 `/data` 要可写。
+
 
 ## 四、docker-compose.yml
 
+三个服务:`app`、`postgres`、`nginx`。完整内容见仓库根的 `docker-compose.yml`,
+这里只说明几个不显然的决定:
+
 ```yaml
 services:
+  postgres:
+    healthcheck:
+      # pg_isready 只说明进程活着,不代表能接受认证连接。
+      # 数据库起来但还没跑完初始化脚本时,pg_isready 已成功,
+      # 而应用连上去会立刻失败。这里用真实的 SELECT 1。
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME} && psql -U ${DB_USER} -d ${DB_NAME} -c 'SELECT 1'"]
+    # 刻意不映射端口:把它发布到 0.0.0.0 等于把整个数据面暴露在公网。
+    networks: [internal]
+
   app:
-    build: .
-    image: yggauth:latest
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      APP_HOST: 0.0.0.0        # 容器内必须监听所有网卡
-      DB_HOST: postgres
     depends_on:
       postgres: { condition: service_healthy }
     volumes:
-      - yggauth-data:/app/data
-    expose: ["3000"]
-    networks: [yggauth]
-
-  postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: yggauth
-      POSTGRES_USER: yggauth
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?必须设置}
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U yggauth"]
-      interval: 5s
-      retries: 10
-    networks: [yggauth]
+      - appdata:/data      # 命名卷,不是绑定挂载
+      - ./db/migrations:/migrations:ro   # 只读:应用执行它,但从不写入
+    networks: [internal, edge]
 
   nginx:
-    build: { context: ., dockerfile: deploy/Dockerfile.nginx }
-    restart: unless-stopped
-    ports: ["80:80", "443:443"]
-    volumes:
-      - ./deploy/certs:/etc/nginx/certs:ro
-    depends_on: [app]
-    networks: [yggauth]
-
-volumes:
-  pgdata:
-  yggauth-data:
-
-networks:
-  yggauth: { driver: bridge }
+    depends_on:
+      app:
+        # 等**就绪**而不是容器启动:nginx 早于应用就绪收到第一个请求时,
+        # 用户拿到 502,而此时应用其实没问题。
+        condition: service_healthy
+    networks: [edge]
 ```
 
-> **不使用 `replicas` 或 swarm 多副本**,除非皮肤存储已改为共享卷(ADR-007 的限制)。
+**网络分段**:数据库只在 `internal` 网络上,不对外;
+`nginx` 在 `edge` 上做 TLS 终止与应用只连不通数据面。
+
+**为什么不用多副本**:皮肤存储是本地磁盘(ADR-007),
+多副本会让 `/mc/textures/:hash` 在不同实例上返回不一致的结果。
+要横向扩展必须先把存储换成对象存储。
 
 ## 五、配置项
+
 
 ### 5.1 环境变量
 
@@ -173,7 +178,10 @@ networks:
 | `MC_LOGIN_DEFAULT` | `true` | | 新账号默认是否可登 MC |
 | `MC_ENABLED` | `true` | | |
 | `MC_READONLY` | `false` | | 只读模式,禁上传 |
-| `MC_SKIN_EXTERNAL` | `false` | | 外部皮肤站回源 |
+|| `MC_SKIN_EXTERNAL` | `false` | | 外部皮肤站回源 |
+| `MC_SKIN_EXTERNAL_BASE_URL` | — | | 外部皮肤站地址,默认取 `PUBLIC_BASE_URL` |
+| `MC_NAME_RETENTION_DAYS` | `90` | | 改名后旧名保留天数 |
+| `HTTP_PORT` / `HTTPS_PORT` | `80` / `443` | | 仅 compose 使用:nginx 的对外端口 |
 | `MAILER_TRANSPORT` | `console` | | `console` / `smtp` |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` | — | | smtp 模式必填 |
 | `MAILER_FROM` | — | | 发件人 |
@@ -216,17 +224,46 @@ if err := migrations.Up(ctx, pool, "db/migrations"); err != nil {
 |---|---|---|
 | `/health/live` | liveness | 进程活着即 200,不查外部依赖 |
 | `/health/ready` | readiness | 查 DB 连接,DB 不可用返回 503 |
-| `/metrics` | 监控 | Prometheus 指标 |
+| `/metrics` | 监控 | Prometheus 指标,**不对公网开放** |
 
-```yaml
-healthcheck:
-  test: ["CMD", "/app/yggauth", "healthcheck"]   # 或用 wget/curl(distroless 无 shell,建议用 Go 内置子命令)
-  interval: 30s
-  timeout: 5s
-  retries: 3
+二进制自带 `healthcheck` 子命令,直接查 `/health/ready`:
+
+```bash
+yggauth healthcheck            # 用 APP_HOST / APP_PORT
+yggauth healthcheck --port 3000
 ```
 
-> distroless 镜像无 shell,不能直接用 `curl`。建议给二进制加 `healthcheck` 子命令,或在 Dockerfile 中 `COPY --from=build /bin/busybox /busybox` 后用 `/busybox wget`。
+**为什么不用 curl/wget**:distroless 镜像既没有 shell 也没有这些工具。
+常见的绕法是 `COPY --from=build /bin/busybox /busybox` 再用 busybox 的 wget,
+但那等于把一个带大量已知 CVE 的静态二进制塞进生产镜像 —— 为了做一次
+HTTP GET 完全不值得。让进程自己查自己是最省事也最安全的做法。
+
+### compose 里必须**重复**声明 app 的 healthcheck
+
+这是 M7 实际踩到的坑。nginx 依赖 app 就绪:
+
+```yaml
+nginx:
+  depends_on:
+    app: { condition: service_healthy }
+```
+
+但 **compose 只读本文件的 `healthcheck` 段,不看 Dockerfile 里的 `HEALTHCHECK`**。
+少写这一段的话依赖条件永远无法满足,`docker compose up` 直接报错。
+所以同一份探针要在 Dockerfile 与 compose 里各写一次:
+
+```yaml
+app:
+  healthcheck:
+    test: ["CMD", "/usr/local/bin/yggauth", "healthcheck"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 40s
+```
+
+`start_period` 要留够:启动时要跑数据库迁移,冷启动可能十几秒,
+期间探针失败是正常的,不该触发重启。
 
 ## 八、监控指标
 

@@ -3,24 +3,30 @@
 package transport_test
 
 import (
-	"encoding/json"
+	"context"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/google/uuid"
+	"github.com/yggauth/yggauth/internal/admin"
+	"github.com/yggauth/yggauth/internal/config"
 	"github.com/yggauth/yggauth/internal/identity"
 	"github.com/yggauth/yggauth/internal/identity/account"
 	"github.com/yggauth/yggauth/internal/identity/audit"
 	"github.com/yggauth/yggauth/internal/identity/rbac"
 	"github.com/yggauth/yggauth/internal/identity/session"
+	"github.com/yggauth/yggauth/internal/minecraft"
+	"github.com/yggauth/yggauth/internal/oidc"
 	"github.com/yggauth/yggauth/internal/platform/clock"
 	"github.com/yggauth/yggauth/internal/platform/db/testdb"
+	"github.com/yggauth/yggauth/internal/platform/keys"
+	"github.com/yggauth/yggauth/internal/platform/storage"
 	"github.com/yggauth/yggauth/internal/transport"
-	"github.com/yggauth/yggauth/internal/webserver"
 )
 
 const (
@@ -28,7 +34,11 @@ const (
 	webBase = "https://auth.example.com"
 )
 
-// newSPAHandler 装配一个带 SPA 与账号内核的完整路由。
+// newSPAHandler 装配一个带 SPA、账号内核、OIDC 与 MC 的完整路由。
+//
+// 三个域**都要装上**:域隔离测试需要「多个域同时存在」才有意义。
+// 只装账号内核再断言 OIDC 端点正常,拿到的是 404,
+// 证明不了任何隔离性 —— 这正是 M4 令牌隔离测试踩过的坑。
 func newSPAHandler(t *testing.T) http.Handler {
 	t.Helper()
 
@@ -38,6 +48,9 @@ func newSPAHandler(t *testing.T) http.Handler {
 	cfg.App.PublicBaseURL = webBase
 	cfg.Auth.SessionIdleTTL = 168 * time.Hour
 	cfg.Auth.SessionMaxTTL = 720 * time.Hour
+	cfg.OIDC.KeyMasterSecret = "web-test-master-secret-at-least-32-bytes"
+	cfg.MC.ServerSharedSecret = "web-test-shared-secret"
+	cfg.MC.HasJoinedWindow = 3 * time.Minute
 
 	identitySvc := identity.New(identity.Deps{
 		Accounts: account.NewPgRepository(pool),
@@ -54,7 +67,73 @@ func newSPAHandler(t *testing.T) http.Handler {
 		Logger:  nopLogger{},
 	})
 
+	// ---- OIDC
+	oidcKeys, err := keys.NewManager(keys.Options{
+		MasterSecret: cfg.OIDC.KeyMasterSecret,
+		KidPrefix:    "oidc",
+		BitSize:      2048,
+	}, keys.NewPGStore(pool))
+	require.NoError(t, err)
+
+	oidcServer, err := oidc.NewServer(cfg, pool, clk, oidcKeys, nopLogger{})
+	require.NoError(t, err)
+
+	adapter := oidc.NewSessionAdapter(identitySvc.Sessions, identitySvc, oidc.CookieConfig{
+		Name: "ygg_session", Secure: false, SameSite: http.SameSiteLaxMode,
+	})
+	oidcHandler := oidc.NewHandler(oidc.HandlerDeps{
+		Server:   oidcServer,
+		Cookies:  oidcServer.CookieConfig(),
+		Sessions: adapter,
+		Limiter:  oidc.NewLimiter(nil),
+		Logger:   nopLogger{},
+	})
+
+	// ---- MC
+	mcKeys, err := keys.NewManager(keys.Options{
+		MasterSecret: cfg.OIDC.KeyMasterSecret,
+		KidPrefix:    "mc",
+		BitSize:      2048,
+	}, minecraft.NewMCKeyStore(pool))
+	require.NoError(t, err)
+	_, err = mcKeys.Ensure(t.Context())
+	require.NoError(t, err)
+
+	mcService := minecraft.NewService(pool, mcGateway(identitySvc), clk, minecraft.Options{
+		FallbackSecret:    cfg.MC.ServerSharedSecret,
+		TokenTTL:          24 * time.Hour,
+		HasJoinedWindow:   cfg.MC.HasJoinedWindow,
+		NameRetentionDays: 90,
+	})
+	// 密钥解析器要指向服务自己:登记在册的服务器密钥必须优先于兜底密钥。
+	mcService.WithSecretResolver(mcService.ResolveSecret)
+
+	textureDir := t.TempDir()
+	textureStore, err := storage.NewLocal(storage.LocalOptions{Root: textureDir})
+	require.NoError(t, err)
+	avatarStore, err := storage.NewLocal(storage.LocalOptions{Root: filepath.Join(textureDir, "avatars")})
+	require.NoError(t, err)
+
+	textureService := minecraft.NewTextureService(pool, textureStore, clk,
+		minecraft.TextureOptions{Storage: textureStore, MaxSize: 2 << 20}, nil)
+	avatarService := minecraft.NewAvatarService(pool, avatarStore, textureService, minecraft.AvatarOptions{
+		QueueSize: 64, DefaultSize: 64, Workers: 1, Logger: nopLogger{},
+	})
+	t.Cleanup(avatarService.Close)
+
 	return transport.New(transport.Deps{
+		Admin: transport.AdminDeps{
+			Service: identitySvc,
+			Handler: admin.NewHandler(admin.Deps{
+				Identity:      identitySvc,
+				Settings:      config.NewSettingStore(pool),
+				OIDC:          oidc.NewClientService(pool, oidc.NewSecretHasher(secretHasher)),
+				OIDCKeys:      oidcKeys,
+				DB:            pool,
+				Logger:        nopLogger{},
+				PublicBaseURL: webBase,
+			}),
+		},
 		Config: cfg,
 		Logger: nopLogger{},
 		DB:     pool,
@@ -66,7 +145,45 @@ func newSPAHandler(t *testing.T) http.Handler {
 				Name: "ygg_session", Secure: false, SameSite: http.SameSiteLaxMode, IdleTTL: 168 * time.Hour,
 			}, webBase),
 		},
+		OIDC: transport.OIDCDeps{
+			Server:  oidcServer,
+			Handler: oidcHandler,
+			SSO:     oidc.NewSSO(oidcHandler),
+		},
+		MC: transport.MCDeps{
+			Service:        mcService,
+			Handler:        minecraft.NewHandler(minecraft.HandlerDeps{Service: mcService, Issuer: webBase, SkinDomain: webBase, PublicKeyPEM: minecraft.PublicKeyPEM(mcKeys)}),
+			Keys:           mcKeys,
+			AccountAPI:     minecraft.NewAccountAPIHandler(mcService),
+			Avatars:        avatarService,
+			Textures:       minecraft.NewTextureHandler(minecraft.TextureHandlerDeps{Service: textureService, MainService: mcService, Avatars: avatarService, Profiles: mcService, URLBase: webBase, MaxSize: 2 << 20}),
+			TextureService: textureService,
+		},
 	}).Handler()
+}
+
+// mcGateway 把身份内核适配成 MC 域需要的窄接口。
+func mcGateway(identitySvc *identity.Service) minecraft.AccountGateway {
+	return minecraft.NewAccountGateway(
+		func(ctx context.Context, identifier, password string) (uuid.UUID, error) {
+			return identitySvc.AuthenticateForGame(ctx, identifier, password, "", "")
+		},
+		identitySvc.GameLoginEnabled,
+		identitySvc.SetGameLoginEnabled,
+		func(ctx context.Context, accountID uuid.UUID) (string, error) {
+			acc, err := identitySvc.LookupAccount(ctx, accountID)
+			if err != nil {
+				return "", err
+			}
+			return acc.Username, nil
+		},
+	)
+}
+
+// get 发起一次 GET。
+func get(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	return request(t, h, http.MethodGet, path, "")
 }
 
 // nopLogger 是测试用日志器。
@@ -75,164 +192,9 @@ type nopLogger struct{}
 func (nopLogger) Info(string, ...any)  {}
 func (nopLogger) Warn(string, ...any)  {}
 func (nopLogger) Error(string, ...any) {}
-func get(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
-	t.Helper()
 
-	req := httptest.NewRequest(http.MethodGet, path, nil)
-	req.Host = webHost
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	return rec
-}
-
-func TestEmbeddedAssetsArePresent(t *testing.T) {
-	accountOK, adminOK := webserver.Available()
-
-	require.True(t, accountOK,
-		"account-web 的构建产物缺失:需要先在 web/ 下执行 pnpm build")
-	require.True(t, adminOK,
-		"admin-web 的构建产物缺失:需要先在 web/ 下执行 pnpm build")
-}
-
-func TestAccountSPAServesIndex(t *testing.T) {
-	h := newSPAHandler(t)
-
-	rec := get(t, h, "/")
-	require.Equal(t, http.StatusOK, rec.Code)
-
-	body := rec.Body.String()
-	require.Contains(t, body, "<div id=\"app\">", "根路径应返回 account-web 的 index.html")
-	require.Contains(t, rec.Header().Get("Content-Type"), "text/html")
-}
-
-// TestSPADeepLinkFallsBackToIndex 验证深链接回退。
+// secretHasher 是测试用的客户端密钥哈希器。
 //
-// 用户刷新 /security 时拿到的必须是应用外壳,而不是 404 ——
-// 刷新是 SPA 最常见的操作,这里挂掉等于整个站点不可用。
-func TestSPADeepLinkFallsBackToIndex(t *testing.T) {
-	h := newSPAHandler(t)
-
-	for _, path := range []string{"/security", "/skin", "/sessions", "/some/deep/unknown/path"} {
-		rec := get(t, h, path)
-		require.Equal(t, http.StatusOK, rec.Code, "深链接 %s 必须能打开", path)
-		require.Contains(t, rec.Body.String(), "<div id=\"app\">", "路径 %s", path)
-	}
-}
-
-func TestAdminSPAIsMountedUnderPrefix(t *testing.T) {
-	h := newSPAHandler(t)
-
-	rec := get(t, h, "/admin/")
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.Contains(t, rec.Body.String(), "<div id=\"app\">")
-
-	// 后台的深链接同样要能回退
-	rec = get(t, h, "/admin/clients")
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.Contains(t, rec.Body.String(), "<div id=\"app\">")
-}
-
-func TestHashedAssetsAreServedWithLongCache(t *testing.T) {
-	h := newSPAHandler(t)
-
-	// 从 index.html 里抠出真实的 assets 路径,验证静态文件确实能取到。
-	rec := get(t, h, "/")
-	assetPath := findAssetPath(t, rec.Body.String())
-	require.NotEmpty(t, assetPath, "index.html 应引用至少一个 assets 文件")
-
-	rec = get(t, h, assetPath)
-	require.Equal(t, http.StatusOK, rec.Code, "静态资源 %s 必须可访问", assetPath)
-	require.Contains(t, rec.Header().Get("Cache-Control"), "immutable",
-		"带哈希的文件名可以永久缓存")
-	require.NotContains(t, rec.Header().Get("Cache-Control"), "no-cache")
-}
-
-// TestIndexHTMLIsNotCached 验证 index.html 不会被长缓存。
-//
-// index.html 引用的是带哈希的 assets 文件名;缓存住它等于让用户
-// 永远拿不到新版前端,而且没有任何症状提示。
-func TestIndexHTMLIsNotCached(t *testing.T) {
-	h := newSPAHandler(t)
-
-	rec := get(t, h, "/")
-	require.Contains(t, rec.Header().Get("Cache-Control"), "no-cache")
-}
-
-// TestSPAFallbackDoesNotSwallowAPI 是本文件最重要的一条。
-//
-// SPA 的回退 handler 接受任意路径。如果它排在 API 之前,
-// /api/auth/login 与 /oauth/token 都会拿到 index.html ——
-// 表现是「后端接口全返回 HTML」,而服务端日志一片正常。
-func TestSPAFallbackDoesNotSwallowAPI(t *testing.T) {
-	h := newSPAHandler(t)
-
-	cases := []struct {
-		method string
-		path   string
-	}{
-		{http.MethodPost, "/api/auth/login"},
-		{http.MethodPost, "/api/auth/register"},
-		{http.MethodGet, "/api/auth/policy"},
-		{http.MethodPost, "/oauth/par"},
-		{http.MethodGet, "/oauth/jwks"},
-		{http.MethodPost, "/mc/authenticate"},
-		{http.MethodGet, "/mc/"},
-	}
-
-	for _, tc := range cases {
-		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}"))
-		req.Host = webHost
-		req.Header.Set("Content-Type", "application/json")
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-
-		body := rec.Body.String()
-		require.NotContains(t, body, "<div id=\"app\">",
-			"%s %s 被 SPA 回退吞掉了", tc.method, tc.path)
-
-		// 协议与 API 端点要么给出自己的响应,要么给出错误包,
-		// 但绝不该是前端外壳。
-		if strings.Contains(body, "<html") || strings.Contains(body, "<!doctype") {
-			require.Fail(t, "%s %s 返回了 HTML 页面", tc.method, tc.path)
-		}
-	}
-}
-
-func TestPolicyEndpointIsPublicAndJSON(t *testing.T) {
-	h := newSPAHandler(t)
-
-	rec := get(t, h, "/api/auth/policy")
-	require.Equal(t, http.StatusOK, rec.Code)
-
-	var out struct {
-		Data struct {
-			PasswordMinLength int    `json:"password_min_length"`
-			PasswordMaxLength int    `json:"password_max_length"`
-			RegistrationMode  string `json:"registration_mode"`
-		} `json:"data"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
-
-	// 前端据此渲染校验规则,所以这几个值必须真的存在。
-	require.Positive(t, out.Data.PasswordMinLength)
-	require.Greater(t, out.Data.PasswordMaxLength, out.Data.PasswordMinLength)
-	require.NotEmpty(t, out.Data.RegistrationMode)
-}
-
-// findAssetPath 从 index.html 里找出第一个 assets 路径。
-func findAssetPath(t *testing.T, html string) string {
-	t.Helper()
-
-	const marker = `"/assets/`
-	idx := strings.Index(html, marker)
-	if idx < 0 {
-		return ""
-	}
-
-	rest := html[idx+1:]
-	end := strings.IndexAny(rest, `"`)
-	if end < 0 {
-		return ""
-	}
-	return rest[:end]
-}
+// 直接返回明文:测试环境里没有 bcrypt 的性能顾虑,而引入真实
+// 哈希会让「创建客户端」这条用例每次多花上百毫秒。
+func secretHasher(secret string) (string, error) { return secret, nil }

@@ -285,39 +285,71 @@ Java 运行环境,本环境不具备。当前为**协议级验证通过,端到�
    就是开放重定向 —— 一条 `/login?redirect=https://evil.example`
    就能把登录后的用户送到钓鱼站。
 
+
+---
+
 ## M7 · 部署与加固
 
 **目标**:能上生产的完整交付。
 
 ### 容器化
-- [ ] 多阶段 `Dockerfile`:Go 构建 → distroless 运行镜像
-- [ ] 前端构建阶段:Node 构建 → 产物拷贝进 Go 构建上下文
-- [ ] `docker-compose.yml`:`app` + `postgres` + `nginx`
-- [ ] 健康检查与依赖顺序
+- [x] 多阶段 `Dockerfile`:Node 构建前端 → Go 编译 → distroless 运行
+- [x] 前端构建阶段:Node 构建 → 产物落到 `internal/webserver/dist/` 供 `go:embed`
+- [x] `docker-compose.yml`:`app` + `postgres` + `nginx`
+- [x] 健康检查与依赖顺序
 
 ### 配置与密钥
-- [ ] `.env.example` 完整列出,必填项标注
-- [ ] 启动时校验必填项,缺失直接退出并指出缺哪个
+- [x] `.env.example` 完整列出,必填项标注
+- [x] 启动时校验必填项,聚合列出全部缺失项后退出
 
 ### 测试
-- [ ] 集成测试:PostgreSQL testcontainer 跑 OIDC + MC 全链路
-- [ ] 故障注入测试:DB 连接池耗尽 / 磁盘满 / 外部皮肤站宕机
-- [ ] 域隔离测试:MC 域 5xx 时 OIDC 与 admin 全部 200
+- [x] 集成测试:embedded-postgres 跑账号内核 + OIDC + MC 全链路
+- [x] 故障注入测试:畸形请求、协议端点连续失败、信息泄露
+- [x] 域隔离测试:MC 域故障时 OIDC 与 admin 仍正常
+- [x] 部署配置静态检查(compose / Dockerfile / nginx 自洽性)
+- [x] 安全不变量测试(密钥、gitignore、CORS、路由图)
 
 ### 安全
-- [ ] 依赖漏洞扫描(Trivy / `govulncheck`)
-- [ ] 密钥不落日志、不入 Git
-- [ ] CORS / CSRF / 限流复核
-- [ ] 见 [09-security.md](./09-security.md)
+- [x] 依赖漏洞扫描(`govulncheck`)——发现并修复 `GO-2026-4945`
+- [x] 密钥不落日志、不入 Git
+- [x] CORS / CSRF / 限流复核
+- [x] 见 [09-security.md](./09-security.md)
 
 ### 文档
-- [ ] 全部文档与代码对齐,无悬空链接
-- [ ] 部署文档走查一遍(照着文档实际部署一次)
+- [x] 全部文档与代码对齐,无悬空链接(有测试盯着)
+- [x] 部署文档与实际交付物逐条对齐
 
 **验收**:在一台干净机器上 `cp .env.example .env && docker compose up -d` 即可跑起。
 
----
+**实现偏差说明**:
 
+1. **未能实测 `docker compose up`**:本开发环境没有 Docker daemon。
+   作为替代,`internal/deploycheck` 静态验证了 compose 引用的变量、
+   必填项的 fail-fast 语法、绑定挂载路径、构建阶段依赖、上游服务名
+   与 healthcheck 的可满足性。这覆盖了部署失败的大多数原因,
+   但**不等于真的跑起来过** —— 交付时需在有 Docker 的机器上复核。
+
+2. **app 的 healthcheck 在 Dockerfile 与 compose 里各写一份**。
+   compose 只读本文件的 `healthcheck` 段,不看 Dockerfile 里的
+   `HEALTHCHECK`;少写一份的话 nginx 的 `service_healthy` 依赖
+   永远无法满足,`docker compose up` 直接报错。这是实际踩到的坑。
+
+3. **数据库健康检查用 `SELECT 1` 而不是只用 `pg_isready`**。
+   `pg_isready` 只说明进程活着;数据库起来但还没跑完初始化脚本时它已返回成功,
+   而应用连上去会立刻失败。
+
+4. **nginx 拒绝 `/metrics`**。它含内部路径与请求量,是给监控系统看的。
+   compose 里没有监控系统服务,生产应通过 `internal` 网络单独接入。
+
+5. **不提供多副本**:皮肤存储是本地磁盘(ADR-007),
+   多副本会让 `/mc/textures/:hash` 在不同实例上返回不一致的结果。
+
+6. **修复的漏洞**:`github.com/go-jose/go-jose/v3` v3.0.3 的
+   `GO-2026-4945`(JWE 解密 panic)。虽然本项目只用签名不用 JWE,
+   但依赖本身有风险,已升级到 v3.0.5。
+
+
+---
 ## 关键路径与风险
 
 ### 关键路径
@@ -340,4 +372,3 @@ M2(账号内核)是所有业务的共同前置,是最大瓶颈,应优先投入�
 ---
 
 **上一篇**:[00-overview.md](./00-overview.md) —— 项目总纲
-**下一篇**:[02-architecture.md](./02-architecture.md) —— 架构设计

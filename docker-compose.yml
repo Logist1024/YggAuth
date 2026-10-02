@@ -1,0 +1,137 @@
+# 生产部署编排:app + postgres + nginx。
+#
+# 验收标准是:在一台干净机器上
+#   cp .env.example .env && docker compose up -d
+# 就能跑起。所以这里的默认值必须自洽 —— compose 里出现的每一个
+# 变量都在 .env.example 里有对应说明,每一个必填项都在 .env 里。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-yggauth}
+      POSTGRES_USER: ${DB_USER:-yggauth}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD 未设置,请在 .env 中填写}
+      # 初始化脚本目录,用于装载扩展。
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # pg_isready 只说明进程活着,不代表能接受认证连接。
+      # 用真实的 SELECT 1 才算数 —— 数据库起来但还没跑完初始化脚本时,
+      # pg_isready 已经返回成功,而应用连上去会立刻失败。
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-yggauth} -d ${DB_NAME:-yggauth} && psql -U ${DB_USER:-yggauth} -d ${DB_NAME:-yggauth} -c 'SELECT 1' >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # 数据库不对外暴露端口。只允许同网络的 app 与运维工具访问 ——
+    # 把它映射到 0.0.0.0 等于把整个数据面暴露在公网上。
+    networks:
+      - internal
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-yggauth}
+      DB_USER: ${DB_USER:-yggauth}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD 未设置}
+      # 下面这些从 .env 透传。必填项在 .env.example 里标注。
+      APP_PUBLIC_DOMAIN: ${APP_PUBLIC_DOMAIN:?必填}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?必填}
+      ADMIN_DOMAIN: ${ADMIN_DOMAIN:-}
+      KEY_MASTER_SECRET: ${KEY_MASTER_SECRET:?必填}
+      DATA_DIR: /data
+      MIGRATIONS_DIR: /migrations
+      TZ: ${TZ:-Asia/Shanghai}
+      # 生产必须开 HTTPS 与 Secure cookie。
+      SSO_COOKIE_SECURE: ${SSO_COOKIE_SECURE:-true}
+      TRUST_PROXY_HEADERS: "true"
+      # 邮件:不配就退回 console 投递,不会导致启动失败。
+      MAILER_TRANSPORT: ${MAILER_TRANSPORT:-console}
+      MAILER_FROM: ${MAILER_FROM:-noreply@localhost}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      # Minecraft 域
+      MC_ENABLED: ${MC_ENABLED:-true}
+      MC_SERVER_SHARED_SECRET: ${MC_SERVER_SHARED_SECRET:-}
+      # OIDC
+      SSO_COOKIE_DOMAIN: ${SSO_COOKIE_DOMAIN:-}
+      SSO_COOKIE_SAMESITE: ${SSO_COOKIE_SAMESITE:-Lax}
+    volumes:
+      # 皮肤与头像。命名卷而不是绑定挂载:数据属于这个部署,
+      # 不该因为宿主机上某个目录被误删而一起消失。
+      - appdata:/data
+      # 迁移文件只读挂载。应用会执行它,但从不写入。
+      - ./db/migrations:/migrations:ro
+    expose:
+      - "3000"
+    healthcheck:
+      # 必须在这里显式声明:nginx 用 `condition: service_healthy` 依赖它,
+      # 而 compose 只看本文件的 healthcheck 段,不看 Dockerfile 里的 HEALTHCHECK。
+      # 缺了这一段,依赖条件无法满足,`docker compose up` 会直接报错。
+      test: ["CMD", "/usr/local/bin/yggauth", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    networks:
+      - internal
+      - edge
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        # 等应用**就绪**而不是容器启动:nginx 早于应用就绪收到
+        # 第一个请求时,用户会拿到 502,而此时应用其实没问题。
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot_www:/var/www/certbot
+      - certbot_conf:/etc/letsencrypt
+    networks:
+      - edge
+
+  # certbot 只在需要时手动运行,不在常驻编排里:
+  #   docker compose run --rm certbot certonly --webroot ...
+  certbot:
+    image: certbot/certbot:latest
+    profiles: ["manual"]
+    volumes:
+      - certbot_www:/var/www/certbot
+      - certbot_conf:/etc/letsencrypt
+    networks:
+      - edge
+
+volumes:
+  pgdata:
+  appdata:
+  certbot_www:
+  certbot_conf:
+
+networks:
+  # internal 不给出口以外的网络暴露数据库。
+  internal:
+    driver: bridge
+  edge:
+    driver: bridge
