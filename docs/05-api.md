@@ -369,3 +369,32 @@ GET /mc/avatar/<uuidOrName>?size=64&hd=false
 
 **上一篇**:[04-decisions.md](./04-decisions.md) —— 关键决策记录
 **下一篇**:[06-mc-protocol.md](./06-mc-protocol.md) —— Minecraft 协议适配
+
+### 4.2 账号侧 MC 端点(M4)
+
+挂在 `/api/account/mc`,**需要会话**,走统一响应包:
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/account/mc/profile` | 查询 MC 档案(uuid、名字、登录开关) |
+| GET | `/api/account/mc/names` | 改名历史 |
+| PATCH | `/api/account/mc/name` | 改名,`{"new_name": "..."}` |
+| GET | `/api/account/mc/login-enabled` | 查询 MC 登录开关 |
+| POST | `/api/account/mc/login-enabled` | 设置开关,`{"enabled": true}` |
+
+### 4.3 与协议的响应格式差异
+
+`/mc/*` 协议端点返回 Yggdrasil 自己的 JSON(`error` / `errorMessage` / `cause`),
+**不是**统一响应包。MC 客户端与 authlib-injector 解析不了后者,
+混用会让它们「点了登录毫无反应」—— 服务端日志却一切正常。
+
+`/api/account/mc/*` 是本站 API,走统一响应包。两者共用同一个 `minecraft.Service`,
+只是入口不同。
+
+状态码约定:
+
+- `hasJoined` 校验通过 → `200` + 档案
+- `hasJoined` 校验失败 → **`204 No Content`**,不带任何响应体
+- `validate` 有效 → `204`;无效 → `403`
+- `invalidate` / `signout` → `204`
+- 其他错误 → `403` + Yggdrasil 错误体

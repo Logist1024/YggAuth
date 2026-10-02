@@ -46,13 +46,20 @@ type Querier interface {
 	CreateDeviceCode(ctx context.Context, arg CreateDeviceCodeParams) (OidcDeviceCode, error)
 	CreateEmailToken(ctx context.Context, arg CreateEmailTokenParams) (IdentityEmailToken, error)
 	CreateInvitation(ctx context.Context, arg CreateInvitationParams) (IdentityInvitation, error)
+	// ---------------------------------------------------------------- 访问令牌
+	CreateMCAccessToken(ctx context.Context, arg CreateMCAccessTokenParams) (MinecraftAccessToken, error)
+	CreateMCServer(ctx context.Context, arg CreateMCServerParams) (MinecraftServer, error)
+	CreateMCSigningKey(ctx context.Context, arg CreateMCSigningKeyParams) (MinecraftSigningKey, error)
 	// ---------------------------------------------------------------- PAR(RFC 9126)
 	CreatePAR(ctx context.Context, arg CreatePARParams) (OidcPushedAuthorizationRequest, error)
 	// ---------------------------------------------------------------- PKCE 会话
 	CreatePKCERequest(ctx context.Context, arg CreatePKCERequestParams) (OidcPkceRequest, error)
+	CreateProfile(ctx context.Context, arg CreateProfileParams) (MinecraftProfile, error)
 	// ---------------------------------------------------------------- 刷新令牌
 	CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) (OidcRefreshToken, error)
 	CreateRole(ctx context.Context, arg CreateRoleParams) (IdentityRole, error)
+	// ---------------------------------------------------------------- 进服会话
+	CreateServerSession(ctx context.Context, arg CreateServerSessionParams) (MinecraftServerSession, error)
 	// 只存 sha256(token),不存明文。
 	CreateSession(ctx context.Context, arg CreateSessionParams) (IdentitySession, error)
 	// 轮换第二步:插入新的 active 密钥。
@@ -70,11 +77,14 @@ type Querier interface {
 	DeleteExpiredDeviceCodes(ctx context.Context) (int64, error)
 	DeleteExpiredEmailTokens(ctx context.Context) (int64, error)
 	DeleteExpiredInvitations(ctx context.Context) (int64, error)
+	DeleteExpiredMCAccessTokens(ctx context.Context) (int64, error)
 	DeleteExpiredPAR(ctx context.Context) (int64, error)
 	DeleteExpiredPKCERequests(ctx context.Context) (int64, error)
 	DeleteExpiredRefreshTokens(ctx context.Context) (int64, error)
+	DeleteExpiredServerSessions(ctx context.Context, window pgtype.Interval) (int64, error)
 	// 后台清理任务用:删除已过期或已吊销超过 30 天的会话。
 	DeleteExpiredSessions(ctx context.Context) (int64, error)
+	DeleteMCServer(ctx context.Context, serverID string) (int64, error)
 	DeletePKCERequest(ctx context.Context, signature []byte) (int64, error)
 	// 内置角色不可删。返回 0 行表示「角色不存在」或「是内置角色」,由服务层区分。
 	DeleteRole(ctx context.Context, id uuid.UUID) (int64, error)
@@ -82,12 +92,17 @@ type Querier interface {
 	DenyDeviceCode(ctx context.Context, id uuid.UUID) (int64, error)
 	// 导出 CSV 用:只按时间窗过滤,规模由调用方控制。
 	ExportAuditEvents(ctx context.Context, arg ExportAuditEventsParams) ([]IdentityAuditEvent, error)
+	// 把仍然有效期的旧名延长到新的保留期。改名链上可能有多个旧名,
+	// 逐个延长才能保证「上一次改名腾出的名字」也受同一条规则约束。
+	ExtendNameRetention(ctx context.Context, arg ExtendNameRetentionParams) error
 	GetAccessTokenByHash(ctx context.Context, tokenHash []byte) (OidcAccessToken, error)
 	GetAccessTokenBySignature(ctx context.Context, signature []byte) (OidcAccessToken, error)
 	// 邮箱唯一性按 lower(email) 判断(变更 C-10),登录/找回密码都走这里。
 	GetAccountByEmail(ctx context.Context, lower string) (IdentityAccount, error)
 	GetAccountByID(ctx context.Context, id uuid.UUID) (IdentityAccount, error)
 	GetAccountByUsername(ctx context.Context, usernameLower string) (IdentityAccount, error)
+	// ---------------------------------------------------------------- 签名密钥
+	GetActiveMCSigningKey(ctx context.Context) (MinecraftSigningKey, error)
 	// 会话校验是最高频查询:只看未吊销、未过期的行。
 	GetActiveSessionByTokenHash(ctx context.Context, tokenHash []byte) (IdentitySession, error)
 	// ---------------------------------------------------------------- 签名密钥
@@ -103,13 +118,28 @@ type Querier interface {
 	GetInvitationByCode(ctx context.Context, code string) (IdentityInvitation, error)
 	// 邮件重发冷却:看最近一次发信时间。
 	GetLastEmailToken(ctx context.Context, arg GetLastEmailTokenParams) (IdentityEmailToken, error)
+	GetMCAccessToken(ctx context.Context, tokenHash []byte) (MinecraftAccessToken, error)
+	// 带 profile 联查:MC 端点的每一次令牌校验都要这个组合,
+	// 分两次查等于给并发刷新留了个竞态窗口。
+	GetMCAccessTokenWithProfile(ctx context.Context, tokenHash []byte) (GetMCAccessTokenWithProfileRow, error)
+	GetMCLoginEnabled(ctx context.Context, id uuid.UUID) (bool, error)
+	// ---------------------------------------------------------------- MC 服务器
+	GetMCServer(ctx context.Context, serverID string) (MinecraftServer, error)
+	GetMCSigningKey(ctx context.Context, kid string) (MinecraftSigningKey, error)
+	GetNameHistory(ctx context.Context, profileID uuid.UUID) ([]MinecraftNameHistory, error)
 	GetPAR(ctx context.Context, requestUriHash []byte) (OidcPushedAuthorizationRequest, error)
 	GetPKCERequest(ctx context.Context, signature []byte) (OidcPkceRequest, error)
 	GetPermission(ctx context.Context, code string) (IdentityPermission, error)
+	GetProfileByAccount(ctx context.Context, accountID uuid.UUID) (MinecraftProfile, error)
+	GetProfileByName(ctx context.Context, currentName string) (MinecraftProfile, error)
+	GetProfileByUUID(ctx context.Context, argUuid uuid.UUID) (MinecraftProfile, error)
 	GetRefreshTokenByHash(ctx context.Context, tokenHash []byte) (OidcRefreshToken, error)
 	GetRefreshTokenBySignature(ctx context.Context, signature []byte) (OidcRefreshToken, error)
+	// 查这个名字是否还在保留期内。reusable_at IS NULL 表示永久保留。
+	GetReusableNameConflict(ctx context.Context, name string) (MinecraftNameHistory, error)
 	GetRoleByCode(ctx context.Context, code string) (IdentityRole, error)
 	GetRoleByID(ctx context.Context, id uuid.UUID) (IdentityRole, error)
+	GetServerSession(ctx context.Context, serverID string) (MinecraftServerSession, error)
 	GetSessionByID(ctx context.Context, id uuid.UUID) (IdentitySession, error)
 	// 全局登出:把同一 SSO 会话下的所有终端用户会话一起吊销。
 	GetSessionBySSOID(ctx context.Context, ssoSessionID pgtype.UUID) ([]IdentitySession, error)
@@ -119,6 +149,8 @@ type Querier interface {
 	HasPermission(ctx context.Context, arg HasPermissionParams) (bool, error)
 	// 审计表只追加,应用层没有任何删除接口(见 docs/09-security.md 9.2)。
 	InsertAuditEvent(ctx context.Context, arg InsertAuditEventParams) (IdentityAuditEvent, error)
+	// ---------------------------------------------------------------- 改名历史
+	InsertNameHistory(ctx context.Context, arg InsertNameHistoryParams) (MinecraftNameHistory, error)
 	// 核销授权码。条件里带 used_at IS NULL,天然防重放:
 	// 同一个码换第二次令牌会命中 0 行。
 	InvalidateAuthorizationCode(ctx context.Context, codeHash []byte) (int64, error)
@@ -134,16 +166,40 @@ type Querier interface {
 	ListActiveSessions(ctx context.Context, accountID uuid.UUID) ([]IdentitySession, error)
 	ListClients(ctx context.Context, arg ListClientsParams) ([]OidcClient, error)
 	ListInvitations(ctx context.Context, arg ListInvitationsParams) ([]ListInvitationsRow, error)
+	ListMCServers(ctx context.Context) ([]MinecraftServer, error)
+	ListMCSigningKeys(ctx context.Context) ([]MinecraftSigningKey, error)
+	// 列出某玩家尚未核销、且仍在时间窗内的进服会话。
+	//
+	// hasJoined 收到的是**签名**(serverIdHash),不是原始 serverId,
+	// 要重算就得把该玩家的候选会话逐个试一遍。因此候选集必须小 ——
+	// 时间窗和「一次核销」两条约束共同把它压到个位数。
+	ListPendingServerSessions(ctx context.Context, arg ListPendingServerSessionsParams) ([]MinecraftServerSession, error)
+	// 同上,但用**调用方算好的截止时间**而不是数据库的 now()。
+	//
+	// 时间窗的判定必须用应用时钟:服务注入的是可替换的 Clock,
+	// 测试要靠推进它来验证过期行为;而数据库的 now() 推不动。
+	// 顺带消除了「数据库时钟与进程时钟漂移」带来的判定不一致。
+	ListPendingServerSessionsBefore(ctx context.Context, arg ListPendingServerSessionsBeforeParams) ([]MinecraftServerSession, error)
 	ListPermissions(ctx context.Context) ([]IdentityPermission, error)
+	ListProfilesByAccount(ctx context.Context, accountID uuid.UUID) ([]MinecraftProfile, error)
 	ListRoleAccounts(ctx context.Context, roleID uuid.UUID) ([]IdentityAccount, error)
 	ListRolePermissions(ctx context.Context, roleID uuid.UUID) ([]IdentityPermission, error)
 	ListRoles(ctx context.Context, search pgtype.Text) ([]IdentityRole, error)
 	ListSettings(ctx context.Context) ([]AppSetting, error)
 	ListSigningKeys(ctx context.Context) ([]OidcSigningKey, error)
+	// 防重放:同一 serverId 只允许成功核销一次。
+	// 条件里带 verified_at IS NULL,第二次 hasJoined 命中 0 行。
+	MarkServerSessionVerified(ctx context.Context, serverID string) (int64, error)
 	// 登录失败计数 +1。达到阈值时把 locked_until 推后 lock_secs 秒。
 	RecordFailedAttempt(ctx context.Context, arg RecordFailedAttemptParams) (IdentityCredential, error)
+	// 改名。current_name 上的唯一索引会挡住重名 —— 这是最后一道防线,
+	// 上层的前置检查只是为了给出可读的错误信息。
+	RenameProfile(ctx context.Context, arg RenameProfileParams) (MinecraftProfile, error)
 	// 登录成功后清零。
 	ResetFailedAttempts(ctx context.Context, arg ResetFailedAttemptsParams) (IdentityCredential, error)
+	// 与 oidc 侧同样的理由:同一语句里改 CTE 再往带唯一索引的列插值,
+	// PostgreSQL 看不见 CTE 的效果,必然撞 duplicate key。拆成两条。
+	RetireActiveMCSigningKey(ctx context.Context) error
 	// 轮换第一步:把当前 active 密钥降级为 retired。
 	//
 	// 旧密钥**不删除** —— 已经发出的令牌还在用它签名,删掉会让存量令牌
@@ -156,6 +212,8 @@ type Querier interface {
 	// 改密码后调用:吊销该账号全部会话。
 	RevokeAllSessions(ctx context.Context, arg RevokeAllSessionsParams) (int64, error)
 	RevokeInvitation(ctx context.Context, id uuid.UUID) (int64, error)
+	RevokeMCAccessToken(ctx context.Context, arg RevokeMCAccessTokenParams) (int64, error)
+	RevokeMCAccessTokensByProfile(ctx context.Context, arg RevokeMCAccessTokensByProfileParams) (int64, error)
 	RevokeRefreshTokenBySignature(ctx context.Context, arg RevokeRefreshTokenBySignatureParams) (int64, error)
 	// 检测到重放时吊销整条轮换链:沿着 rotated_from 往上把祖先全部作废。
 	RevokeRefreshTokenChain(ctx context.Context, arg RevokeRefreshTokenChainParams) (int64, error)
@@ -163,6 +221,11 @@ type Querier interface {
 	RevokeRefreshTokensByClient(ctx context.Context, arg RevokeRefreshTokensByClientParams) (int64, error)
 	RevokeRole(ctx context.Context, arg RevokeRoleParams) (int64, error)
 	RevokeSession(ctx context.Context, arg RevokeSessionParams) (IdentitySession, error)
+	// 刷新:吊销旧令牌并签发新的一条,在同一条语句里完成。
+	//
+	// 分成两步的话,中间崩溃会留下「旧令牌已废、新令牌没发」的空窗,
+	// 玩家会被直接踢下线。
+	RotateMCAccessToken(ctx context.Context, arg RotateMCAccessTokenParams) (MinecraftAccessToken, error)
 	// 后台审计检索。可选参数为 NULL 时不参与过滤。
 	SearchAuditEvents(ctx context.Context, arg SearchAuditEventsParams) ([]IdentityAuditEvent, error)
 	SetAccountEmailVerified(ctx context.Context, id uuid.UUID) (IdentityAccount, error)
@@ -181,6 +244,7 @@ type Querier interface {
 	UpdateClient(ctx context.Context, arg UpdateClientParams) (OidcClient, error)
 	// 轮换密钥。旧密钥立即失效,属于有意为之的破坏性变更。
 	UpdateClientSecret(ctx context.Context, arg UpdateClientSecretParams) (OidcClient, error)
+	UpdateMCServer(ctx context.Context, arg UpdateMCServerParams) (MinecraftServer, error)
 	// is_system 的内置角色不允许改名改 code,避免破坏依赖角色 code 的脚本。
 	UpdateRole(ctx context.Context, arg UpdateRoleParams) (IdentityRole, error)
 	// ---------------------------------------------------------------- 同意记录

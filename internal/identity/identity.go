@@ -149,3 +149,33 @@ func (s *Service) LookupAccount(ctx context.Context, id uuid.UUID) (domain.Accou
 func (s *Service) PermissionsFor(ctx context.Context, accountID uuid.UUID) ([]string, error) {
 	return s.RBAC.PermissionsFor(ctx, accountID)
 }
+
+// AuthenticateForGame 校验凭据但不签发任何会话。
+//
+// Minecraft 域只需要「验证用户名密码」这一件事本身,不想要账号内核
+// 登录流程带来的副作用(会话签发、SSO 联动、「登录成功」审计事件)。
+// 完整理由见 account.Service.AuthenticateForGame 的注释。
+func (s *Service) AuthenticateForGame(ctx context.Context, identifier, password, ip, userAgent string) (uuid.UUID, error) {
+	acc, err := s.Accounts.AuthenticateForGame(ctx, account.GameAuthInput{
+		Identifier: identifier,
+		Password:   password,
+		IP:         ip,
+		UserAgent:  userAgent,
+	})
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return acc.ID, nil
+}
+
+// SetGameLoginEnabled 设置账号在某业务域的登录开关。
+//
+// 开关的语义由对应域定义,内核只当它是「一个可开关的布尔值」。
+func (s *Service) SetGameLoginEnabled(ctx context.Context, accountID uuid.UUID, enabled bool) error {
+	return s.Accounts.SetGameLoginEnabled(ctx, accountID, enabled)
+}
+
+// GameLoginEnabled 查询账号在某业务域的登录开关。
+func (s *Service) GameLoginEnabled(ctx context.Context, accountID uuid.UUID) (bool, error) {
+	return s.Accounts.GameLoginEnabled(ctx, accountID)
+}

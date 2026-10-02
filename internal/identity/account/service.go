@@ -738,3 +738,106 @@ func (s *Service) auditFailure(ctx context.Context, accountID *uuid.UUID, action
 
 // ErrUnsupported 表示请求的令牌用途不受支持。
 var ErrUnsupported = errors.New("不支持的令牌用途")
+
+// GameAuthInput 是业务域(Minecraft)发起的凭据校验入参。
+type GameAuthInput struct {
+	// Identifier 是用户名**或**邮箱。MC 客户端两种都接受。
+	Identifier string
+	Password   string
+	IP         string
+	UserAgent  string
+}
+
+// AuthenticateForGame 校验凭据,但**不签发任何会话**。
+//
+// 为什么不开 Session 复用现成的 Authenticate:
+//  1. MC 登录不该产生一条 Web 会话。MC 客户端没有 cookie、没有浏览器,
+//     给它发一个浏览器会话既没用,又让「登出全部设备」变得含糊不清。
+//  2. 账号内核的登录流程会写「登录成功」审计事件。MC 登录是独立入口,
+//     重复计入同一条事件会让审计日志被刷满,真正需要关注的事件反而看不见。
+//  3. SSO 联动是浏览器场景的语义,MC 侧没有对应物。
+//
+// 但安全检查**一个都不能少**:失败计数、账号锁定、停用、邮箱未验证、
+// 以及账号级登录开关。少任何一条,MC 就成了绕过账号保护的旁路。
+func (s *Service) AuthenticateForGame(ctx context.Context, in GameAuthInput) (domain.Account, error) {
+	identifier := strings.TrimSpace(in.Identifier)
+	if identifier == "" || in.Password == "" {
+		return domain.Account{}, apperr.New(apperr.CodeInvalidArgument, "用户名与密码不能为空")
+	}
+
+	acc, err := s.lookupForLogin(ctx, identifier)
+	if err != nil {
+		if !apperr.Is(err, apperr.CodeNotFound) {
+			return domain.Account{}, err
+		}
+		// 账号不存在时也要走一次等价开销的哈希运算,拉平响应时间 ——
+		// 否则可以用来枚举「哪些用户名在本服务注册过」。
+		s.dummyHash(in.Password)
+		return domain.Account{}, apperr.New(apperr.CodeInvalidPassword, "用户名或密码错误")
+	}
+
+	cred, err := s.repo.GetCredential(ctx, acc.ID, AlgoArgon2id)
+	if err != nil {
+		return domain.Account{}, err
+	}
+
+	now := s.clock.Now()
+	if cred.Locked(now) {
+		return domain.Account{}, apperr.Newf(apperr.CodeAccountLocked,
+			"账号已锁定,请在 %s 后重试", cred.LockedUntil.Sub(now).Round(time.Second))
+	}
+
+	if !s.hasher.Verify(in.Password, cred.Hash) {
+		shouldLock := cred.FailedAttempts+1 >= s.cfg.MaxFailedAttempts
+		if _, err := s.repo.RecordFailedAttempt(ctx, acc.ID, AlgoArgon2id, shouldLock, s.cfg.LockDuration); err != nil {
+			s.logger.Error("record failed attempt", "account_id", acc.ID, "error", err)
+		}
+		if shouldLock {
+			return domain.Account{}, apperr.New(apperr.CodeAccountLocked, "登录失败次数过多,账号已锁定")
+		}
+		return domain.Account{}, apperr.New(apperr.CodeInvalidPassword, "用户名或密码错误")
+	}
+
+	// 密码正确后再看状态:与浏览器登录保持一致,顺序反过来就成了枚举接口
+	if !acc.Status.Usable() {
+		switch acc.Status {
+		case domain.StatusDisabled:
+			return domain.Account{}, apperr.New(apperr.CodeAccountDisabled, "账号已被禁用")
+		case domain.StatusLocked:
+			return domain.Account{}, apperr.New(apperr.CodeAccountLocked, "账号已锁定")
+		case domain.StatusPendingVerification:
+			return domain.Account{}, apperr.New(apperr.CodeEmailUnverified, "邮箱尚未验证")
+		}
+		return domain.Account{}, apperr.New(apperr.CodeAccountDisabled, "账号当前不可用")
+	}
+
+	if err := s.repo.ResetFailedAttempts(ctx, acc.ID, AlgoArgon2id); err != nil {
+		s.logger.Error("reset failed attempts", "account_id", acc.ID, "error", err)
+	}
+	return acc, nil
+}
+
+// lookupForLogin 按「像邮箱就用邮箱,否则用用户名」查账号。
+//
+// MC 客户端把同一个输入框当用户名或邮箱用,服务端不该替它选一个失败的口径。
+func (s *Service) lookupForLogin(ctx context.Context, identifier string) (domain.Account, error) {
+	if strings.Contains(identifier, "@") {
+		return s.repo.GetByEmail(ctx, identifier)
+	}
+	return s.repo.GetByUsername(ctx, identifier)
+}
+
+// SetGameLoginEnabled 设置账号在某业务域的登录开关。
+func (s *Service) SetGameLoginEnabled(ctx context.Context, accountID uuid.UUID, enabled bool) error {
+	_, err := s.repo.SetLoginEnabled(ctx, accountID, enabled)
+	return err
+}
+
+// GameLoginEnabled 查询账号在某业务域的登录开关。
+func (s *Service) GameLoginEnabled(ctx context.Context, accountID uuid.UUID) (bool, error) {
+	acc, err := s.repo.GetByID(ctx, accountID)
+	if err != nil {
+		return false, err
+	}
+	return acc.MCLoginEnabled, nil
+}

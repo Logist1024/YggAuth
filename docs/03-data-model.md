@@ -526,3 +526,58 @@ M3 把授权服务真正接上 fosite 之后,基线(00001–00004)里有三处�
    客户端信息 —— 还原时按 ID 重新查库。
 3. **已授予的 scope 以数据库列为准**,不采信 JSON 里的副本:那份载荷虽然
    签过名,但没有加密。
+
+---
+
+## 十一、M4 MC 认证域
+
+M4 未新增表 —— `minecraft` schema 在基线迁移 `00003_init_minecraft.sql` 里已定型。
+这里记录实现时对既有设计的修正,以及各表在本实现中的实际用途。
+
+### 11.1 `minecraft.access_token` 与 OIDC 的隔离
+
+| 维度 | `minecraft.access_token` | `oidc.access_token` |
+|---|---|---|
+| 令牌形态 | 32 位无横线小写 hex(128 位熵) | 随机 base64url(256 位熵) |
+| 存储 | `token_hash = sha256(token)` | 哈希 + 明文片段(供 introspection) |
+| 消费者 | authlib-injector / MC 服务端 | fosite |
+| 刷新 | `/mc/refresh` 手动换发,clientToken 保持 | OAuth 流程自动 |
+| 表 | `minecraft.access_token` | `oidc.access_token` |
+
+MC 令牌的熵只有 128 位,低于现代标准。这不是为了省事,而是协议硬约束:
+MYSQLMOJANG 要求服务端把令牌当 UUID 解析。补偿手段是**每次刷新都换新令牌**,
+把单个令牌的有效窗口压到一次会话,再加上库里只存哈希。
+
+### 11.2 `minecraft.server_session` 是防重放的核心
+
+`hasJoined` 收到的是**签名**(`serverIdHash`)而不是原始 `serverId`。
+服务端要判断签名有效性,只能在该玩家的候选会话里逐个重算
+`sha1(serverId + sharedSecret + uuid)`。因此候选集必须小:
+
+- `verified_at IS NULL` —— 已核销的会话不再参与比对;
+- `joined_at >= now() - MC_HASJOINED_WINDOW` —— 超窗的会话不参与比对;
+- `LIMIT 20` —— 兜底上限,防止极端情况下候选集膨胀。
+
+核销用 `UPDATE ... WHERE server_id = ? AND verified_at IS NULL`。
+第二次 `hasJoined` 命中 0 行,自然退化成重放拒绝 —— 不需要在应用层记
+「哪些签名用过」。
+
+时间窗的截止时间由**应用时钟**算出后作为参数传入 SQL,
+而不是在 SQL 里写 `now()`。两个原因:服务注入的是可替换的 `Clock`,
+测试要靠推进它验证过期;同时消除数据库时钟与进程时钟漂移带来的判定不一致。
+
+### 11.3 `minecraft.signing_key` 与 `oidc.signing_key`
+
+两张表结构相同但完全独立,kid 前缀分别是 `mc-` 与 `oidc-`。
+`signaturePublickey` 只来自 MC 表,与 JWKS 无关。
+
+轮换同样是「退役 + 插入」两条语句 —— `status` 列上有部分唯一索引,
+PostgreSQL 在同一条语句里看不见数据修改 CTE 对该索引的效果。
+
+### 11.4 `minecraft.name_history` 的保留期语义
+
+`reusable_at` 到点后名字才允许被再次占用。为 NULL 表示永久保留。
+
+改名时会一并延长该玩家**所有**仍有效的旧名到期点:
+`ExtendNameRetention` 把 `reusable_at` 推到同一个时间。否则会出现
+「改过三次的账号,第一次腾出的名字只受第一次的规则约束」这种不一致。

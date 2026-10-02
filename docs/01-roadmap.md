@@ -146,26 +146,44 @@
 **目标**:Minecraft 服务端能通过 authlib-injector 认证。
 
 ### Yggdrasil 协议
-- [ ] `POST /mc/authenticate`(用户名 + 密码 → accessToken)
-- [ ] `POST /mc/refresh`、`POST /mc/validate`、`POST /mc/invalidate`
-- [ ] `POST /mc/signout`
-- [ ] `GET /mc/`(metadata,含 skinDomains)
-- [ ] `GET /mc/hasJoined?username=&serverId=`(**HMAC-SHA1 五生效点校验**)
-- [ ] `POST /mc/join`(用 serverId 生成 clientToken)
-- [ ] `GET /mc/profile/:uuid`、`POST /mc/profiles/minecraft`
+- [x] `POST /mc/authenticate`(用户名 + 密码 → accessToken)
+- [x] `POST /mc/refresh`、`POST /mc/validate`、`POST /mc/invalidate`
+- [x] `POST /mc/signout`
+- [x] `GET /mc/`(metadata,含 skinDomains)
+- [x] `GET /mc/hasJoined?username=&serverId=`(**HMAC-SHA1 五生效点校验**)
+- [x] `POST /mc/join`(用 serverId 生成 clientToken)
+- [x] `GET /mc/profile/:uuid`、`POST /mc/profiles/minecraft`
 
 ### 数据模型
-- [ ] `mc_profile`:uuid ↔ account 一对一映射
-- [ ] `mc_name_history`:改名历史,旧名保留一段时间
-- [ ] `mc_access_token`:与 OAuth token 完全隔离的独立表
-- [ ] `mc_signing_key`:MC 域独立签名密钥(ADR-003)
+- [x] `mc_profile`:uuid ↔ account 一对一映射
+- [x] `mc_name_history`:改名历史,旧名保留一段时间
+- [x] `mc_access_token`:与 OAuth token 完全隔离的独立表
+- [x] `mc_signing_key`:MC 域独立签名密钥(ADR-003)
 
 ### 独立性
-- [ ] 签发的 token 与 OAuth token **类型、存储、签名密钥全不相同**
-- [ ] `mc_login_enabled=false` 的账号在 `authenticate` 明确拒绝
-- [ ] 域故障(签名密钥丢失 / DB 不可用)不影响 OIDC 链路
+- [x] 签发的 token 与 OAuth token **类型、存储、签名密钥全不相同**
+- [x] `mc_login_enabled=false` 的账号在 `authenticate` 明确拒绝
+- [x] 域故障(签名密钥丢失 / DB 不可用)不影响 OIDC 链路
 
 **验收**:通过协议级测试验证签名可验证、防重放、离线服务器正确拒绝。
+
+**实现偏差说明**:
+
+1. 表名以基线迁移 `00003_init_minecraft.sql` 为准:`minecraft.profile`、
+   `minecraft.name_history`、`minecraft.access_token`、`minecraft.signing_key`。
+2. `/mc/join` **不生成** clientToken,而是登记一份带时间窗的进服会话
+   (`minecraft.server_session`)。clientToken 由客户端提供且在刷新时保持不变——
+   MC 客户端用它标识「哪台设备在登录」,换掉它会让客户端要求重新选档案。
+3. `hasJoined` 收到的是**签名**(serverIdHash)而非原始 serverId,因此
+   实现改为:在候选会话里逐个用 `serverId + secret + uuid` 重算比对。
+   这也是协议的真实语义,而不是把签名和 serverId 自身比较。
+4. `/mc/skin/:uuidOrName`、`/mc/avatar/:uuidOrName`、`/mc/textures/:hash` 
+   属于皮肤站,留到 M5 实现,已在本文档末尾标注。
+5. 账号侧的 MC 端点(改名、开关、档案查询)挂在 `/api/account/mc/*`,
+   与协议端点共用同一个服务但走统一响应包。
+
+**未实测部分**:真实 MC 服务端 + authlib-injector 的端到端进服需要外部 
+Java 运行环境,本环境不具备。当前为**协议级验证通过,端到端未实测**。
 
 ---
 

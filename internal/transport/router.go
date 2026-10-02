@@ -105,6 +105,9 @@ func (rt *Router) Handler() http.Handler {
 			r.Use(rt.sessionAuth)
 			r.Use(httpx.CSRFProtect)
 			rt.deps.Identity.Handler.Mount(r, httpx.RequireAuth)
+			if rt.deps.MC.AccountAPI != nil {
+				rt.deps.MC.AccountAPI.Mount(&accountRoutes{r})
+			}
 			if rt.deps.Admin.Handler != nil {
 				rt.deps.Admin.Handler.Mount(r)
 			}
@@ -115,13 +118,17 @@ func (rt *Router) Handler() http.Handler {
 				rt.mountDeviceRoutes(r)
 			}
 		})
+		// 协议前缀 (/oauth、/mc) 整段挂在根上。
+	}
+	// MC 协议端点挂在 /mc,**不套 CSRF**:
+	// authlib-injector 与 MC 客户端都是机器对机器调用,
+	// 同样不会为了发一次请求先取 CSRF token。
+	if rt.deps.MC.Handler != nil {
+		r.Route("/mc", rt.deps.MC.Handler.Mount)
 	}
 
-	// /oauth 是标准协议前缀,整段挂在根上。
-	//
-	// 它**不套** CSRF:令牌、授权、内省这些端点是机器对机器的调用。
-	// 给它们加 CSRF 只会让标准 OAuth 客户端全部无法工作 ——
-	// 它们不会、也不该为了发一次令牌请求而先取一个 CSRF token。
+	// /oauth 同样不套 CSRF:标准 OAuth 客户端不会、也不该
+	// 为了换一枚令牌先取一个 CSRF token。
 	if rt.deps.OIDC.Handler != nil {
 		r.Route("/oauth", rt.deps.OIDC.Handler.Mount)
 	}
@@ -194,3 +201,17 @@ func (s *statusRecorder) Flush() {
 		f.Flush()
 	}
 }
+
+// accountRoutes 把 chi.Router 适配成 MC 账号端点需要的最小形状。
+type accountRoutes struct{ r chi.Router }
+
+// Get 注册 GET 路由。
+func (a *accountRoutes) Get(pattern string, h http.HandlerFunc) { a.r.Get("/account/mc"+pattern, h) }
+
+// Patch 注册 PATCH 路由。
+func (a *accountRoutes) Patch(pattern string, h http.HandlerFunc) {
+	a.r.Patch("/account/mc"+pattern, h)
+}
+
+// Post 注册 POST 路由。
+func (a *accountRoutes) Post(pattern string, h http.HandlerFunc) { a.r.Post("/account/mc"+pattern, h) }

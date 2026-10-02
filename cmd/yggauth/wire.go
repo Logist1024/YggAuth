@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/yggauth/yggauth/internal/admin"
 	"github.com/yggauth/yggauth/internal/config"
@@ -12,6 +15,7 @@ import (
 	"github.com/yggauth/yggauth/internal/identity/audit"
 	"github.com/yggauth/yggauth/internal/identity/rbac"
 	"github.com/yggauth/yggauth/internal/identity/session"
+	"github.com/yggauth/yggauth/internal/minecraft"
 	"github.com/yggauth/yggauth/internal/oidc"
 	"github.com/yggauth/yggauth/internal/platform/clock"
 	"github.com/yggauth/yggauth/internal/platform/db"
@@ -112,6 +116,36 @@ func buildDeps(cfg *config.Config, logger *slog.Logger, pool *db.Pool) transport
 
 	oidcHandler := oidc.NewHandler(oidcHandlerDeps(cfg, oidcServer, sessionAdapter, deviceService, loggerAdapter{logger}))
 	// ---- 管理后台
+	// ---- Minecraft 认证域
+	//
+	// 依赖方向单向:MC 域 → 账号内核。MC 用自己的令牌表与签名密钥,
+	// 与 OIDC 完全隔离(ADR-003),任何一边故障都不该影响另一边。
+	mcKeys, err := keys.NewManager(keys.Options{
+		MasterSecret: cfg.OIDC.KeyMasterSecret,
+		KidPrefix:    "mc",
+		BitSize:      2048,
+	}, minecraft.NewMCKeyStore(pool))
+	if err != nil {
+		panic("初始化 MC 签名密钥失败: " + err.Error())
+	}
+	if _, err := mcKeys.Ensure(context.Background()); err != nil {
+		panic("准备 MC 签名密钥失败: " + err.Error())
+	}
+	mcService := minecraft.NewService(pool, mcGateway(identitySvc), clk, minecraft.Options{
+		FallbackSecret:    cfg.MC.ServerSharedSecret,
+		TokenTTL:          mcTokenTTL(cfg),
+		HasJoinedWindow:   cfg.MC.HasJoinedWindow,
+		NameRetentionDays: cfg.MC.NameRetentionDays,
+	})
+	mcService.WithSecretResolver(mcServiceResolver(pool))
+
+	mcHandler := minecraft.NewHandler(minecraft.HandlerDeps{
+		Service:      mcService,
+		Issuer:       cfg.App.BaseURL(),
+		SkinDomain:   cfg.App.BaseURL(),
+		PublicKeyPEM: minecraft.PublicKeyPEM(mcKeys),
+		TrustProxy:   cfg.App.TrustProxyHeaders,
+	})
 
 	//
 	// 放在授权服务之后:后台的「OIDC 客户端」页要读写客户端与签名密钥,
@@ -130,6 +164,12 @@ func buildDeps(cfg *config.Config, logger *slog.Logger, pool *db.Pool) transport
 		Logger: logger,
 		DB:     pool,
 		Clock:  clk,
+		MC: transport.MCDeps{
+			Service:    mcService,
+			Handler:    mcHandler,
+			Keys:       mcKeys,
+			AccountAPI: minecraft.NewAccountAPIHandler(mcService),
+		},
 		OIDC: transport.OIDCDeps{
 			Server:  oidcServer,
 			Handler: oidcHandler,
@@ -245,4 +285,46 @@ func devicePollInterval(cfg *config.Config) int {
 		return 1
 	}
 	return defaultInterval
+}
+
+// mcServiceResolver 返回 MC 服务器的预共享密钥解析器。
+//
+// 直接查库而不是读配置:一个部署可能同时挂着多台 MC 服务器,密钥各不相同。
+func mcServiceResolver(pool *db.Pool) minecraft.SecretResolver {
+	svc := minecraft.NewService(pool, nil, clock.New(), minecraft.Options{})
+	return func(ctx context.Context, serverID string) (string, minecraft.SecretStatus, error) {
+		return svc.ResolveSecret(ctx, serverID)
+	}
+}
+
+// mcTokenTTL 决定 MC 访问令牌的有效期。
+//
+// 刻意比 OIDC 的 access token 长:Minecraft 服务端不会主动续期,
+// 令牌一断玩家就得重新走登录流程。
+func mcTokenTTL(cfg *config.Config) time.Duration {
+	const ttl = 24 * time.Hour
+	if !cfg.MC.Enabled {
+		return ttl
+	}
+	return ttl
+}
+
+// mcGateway 把身份内核适配成 MC 域需要的窄接口。
+//
+// 依赖方向在这里显式落地:MC 域依赖身份内核,反过来内核完全不知道 MC 的存在。
+func mcGateway(identitySvc *identity.Service) minecraft.AccountGateway {
+	return minecraft.NewAccountGateway(
+		func(ctx context.Context, identifier, password string) (uuid.UUID, error) {
+			return identitySvc.AuthenticateForGame(ctx, identifier, password, "", "")
+		},
+		identitySvc.GameLoginEnabled,
+		identitySvc.SetGameLoginEnabled,
+		func(ctx context.Context, accountID uuid.UUID) (string, error) {
+			acc, err := identitySvc.LookupAccount(ctx, accountID)
+			if err != nil {
+				return "", err
+			}
+			return acc.Username, nil
+		},
+	)
 }

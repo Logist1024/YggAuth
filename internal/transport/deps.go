@@ -3,7 +3,9 @@ package transport
 import (
 	"github.com/yggauth/yggauth/internal/admin"
 	"github.com/yggauth/yggauth/internal/identity"
+	"github.com/yggauth/yggauth/internal/minecraft"
 	"github.com/yggauth/yggauth/internal/oidc"
+	"github.com/yggauth/yggauth/internal/platform/keys"
 )
 
 // 各业务域的装配依赖。
@@ -28,8 +30,15 @@ type OIDCDeps struct {
 	Device *oidc.DeviceService
 }
 
-// MCDeps 是游戏域的依赖(M4/M5 填充)。
-type MCDeps struct{}
+// MCDeps 是游戏域的依赖。
+type MCDeps struct {
+	Service *minecraft.Service
+	Handler *minecraft.Handler
+	// Keys 是 MC 域独立的签名密钥管理器(kid 前缀 mc-)
+	Keys *keys.Manager
+	// AccountAPI 是账号侧的 MC 管理端点
+	AccountAPI *minecraft.AccountAPIHandler
+}
 
 // AdminDeps 是管理后台的依赖。
 type AdminDeps struct {
