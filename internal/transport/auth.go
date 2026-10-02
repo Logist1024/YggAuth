@@ -1,0 +1,97 @@
+package transport
+
+import (
+	"context"
+	"net/http"
+
+	"github.com/google/uuid"
+
+	"github.com/yggauth/yggauth/internal/domain"
+	"github.com/yggauth/yggauth/internal/identity"
+	"github.com/yggauth/yggauth/internal/platform/apperr"
+	"github.com/yggauth/yggauth/internal/platform/httpx"
+	"github.com/yggauth/yggauth/internal/platform/log"
+)
+
+// AuthConfig 是会话认证中间件的配置。
+type AuthConfig struct {
+	// CookieName 是会话 cookie 名
+	CookieName string
+	// TrustProxyHeaders 决定取 IP 时是否信任转发头
+	TrustProxyHeaders bool
+}
+
+// SessionAuthenticator 校验会话令牌。
+//
+// 定义成接口而不是直接用 *identity.Service,是为了让 transport 层
+// 不必知道账号内核的具体类型。
+type SessionAuthenticator interface {
+	// Authenticate 校验会话令牌。令牌无效时返回 apperr.CodeSessionExpired。
+	AuthenticateSession(ctx context.Context, token string) (identity.AuthenticatedSession, error)
+	// LookupAccount 按主键取账号。
+	LookupAccount(ctx context.Context, id uuid.UUID) (domain.Account, error)
+	// PermissionsFor 返回账号权限点。
+	PermissionsFor(ctx context.Context, accountID uuid.UUID) ([]string, error)
+}
+
+// SessionAuth 中间件解析会话 cookie 或 Bearer 令牌,构造已认证主体。
+//
+// 两种凭据都接受:
+//   - Cookie:终端用户站与管理后台
+//   - Bearer:接口调用方(内部工具、脚本)
+//
+// 主体挂到上下文后,后续的 RequirePermission 才能读到权限点。
+func SessionAuth(auth SessionAuthenticator, cfg AuthConfig) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			token := httpx.ReadCookie(r, cfg.CookieName)
+			if token == "" {
+				token = httpx.BearerToken(r)
+			}
+			if token == "" {
+				// 没有凭据不算错误:公开接口照样能过,
+				// 需要登录的接口另有 RequireAuth 把关。
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			res, err := auth.AuthenticateSession(r.Context(), token)
+			if err != nil {
+				httpx.Fail(w, apperr.From(err))
+				return
+			}
+
+			acc, err := auth.LookupAccount(r.Context(), res.Session.AccountID)
+			if err != nil {
+				httpx.Fail(w, apperr.From(err))
+				return
+			}
+
+			// 账号在会话创建之后被禁用/删除,登录态必须立刻失效
+			if !acc.Status.Usable() {
+				httpx.Fail(w, apperr.New(apperr.CodeAccountDisabled, "账号已被禁用"))
+				return
+			}
+
+			codes, err := auth.PermissionsFor(r.Context(), acc.ID)
+			if err != nil {
+				httpx.Fail(w, apperr.From(err))
+				return
+			}
+
+			// 权限点变更立即生效:每次请求都重新求值,
+			// 不把权限烤进会话里(否则撤权要等会话过期才生效)
+			p := &domain.Principal{
+				AccountID:   acc.ID,
+				Username:    acc.Username,
+				Email:       acc.Email,
+				SessionID:   res.Session.ID,
+				Permissions: codes,
+			}
+			ctx := httpx.WithPrincipal(r.Context(), p)
+			ctx = log.WithFields(ctx, log.KeyAccountID, acc.ID)
+
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}

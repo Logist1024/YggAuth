@@ -45,7 +45,7 @@ type CreateSessionParams struct {
 }
 
 // 只存 sha256(token),不存明文。
-func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (*IdentitySession, error) {
+func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (IdentitySession, error) {
 	row := q.db.QueryRow(ctx, createSession,
 		arg.AccountID,
 		arg.TokenHash,
@@ -70,7 +70,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (*
 		&i.Ip,
 		&i.UserAgent,
 	)
-	return &i, err
+	return i, err
 }
 
 const deleteExpiredSessions = `-- name: DeleteExpiredSessions :execrows
@@ -97,7 +97,7 @@ WHERE token_hash = $1
 `
 
 // 会话校验是最高频查询:只看未吊销、未过期的行。
-func (q *Queries) GetActiveSessionByTokenHash(ctx context.Context, tokenHash []byte) (*IdentitySession, error) {
+func (q *Queries) GetActiveSessionByTokenHash(ctx context.Context, tokenHash []byte) (IdentitySession, error) {
 	row := q.db.QueryRow(ctx, getActiveSessionByTokenHash, tokenHash)
 	var i IdentitySession
 	err := row.Scan(
@@ -114,14 +114,14 @@ func (q *Queries) GetActiveSessionByTokenHash(ctx context.Context, tokenHash []b
 		&i.Ip,
 		&i.UserAgent,
 	)
-	return &i, err
+	return i, err
 }
 
 const getSessionByID = `-- name: GetSessionByID :one
 SELECT id, account_id, token_hash, sso_session_id, created_at, last_seen_at, expires_at, idle_expires_at, revoked_at, revoke_reason, ip, user_agent FROM identity.session WHERE id = $1
 `
 
-func (q *Queries) GetSessionByID(ctx context.Context, id uuid.UUID) (*IdentitySession, error) {
+func (q *Queries) GetSessionByID(ctx context.Context, id uuid.UUID) (IdentitySession, error) {
 	row := q.db.QueryRow(ctx, getSessionByID, id)
 	var i IdentitySession
 	err := row.Scan(
@@ -138,7 +138,7 @@ func (q *Queries) GetSessionByID(ctx context.Context, id uuid.UUID) (*IdentitySe
 		&i.Ip,
 		&i.UserAgent,
 	)
-	return &i, err
+	return i, err
 }
 
 const getSessionBySSOID = `-- name: GetSessionBySSOID :many
@@ -147,13 +147,13 @@ WHERE sso_session_id = $1 AND revoked_at IS NULL
 `
 
 // 全局登出:把同一 SSO 会话下的所有终端用户会话一起吊销。
-func (q *Queries) GetSessionBySSOID(ctx context.Context, ssoSessionID pgtype.UUID) ([]*IdentitySession, error) {
+func (q *Queries) GetSessionBySSOID(ctx context.Context, ssoSessionID pgtype.UUID) ([]IdentitySession, error) {
 	rows, err := q.db.Query(ctx, getSessionBySSOID, ssoSessionID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []*IdentitySession{}
+	items := []IdentitySession{}
 	for rows.Next() {
 		var i IdentitySession
 		if err := rows.Scan(
@@ -172,7 +172,7 @@ func (q *Queries) GetSessionBySSOID(ctx context.Context, ssoSessionID pgtype.UUI
 		); err != nil {
 			return nil, err
 		}
-		items = append(items, &i)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -203,13 +203,13 @@ WHERE account_id = $1
 ORDER BY last_seen_at DESC
 `
 
-func (q *Queries) ListActiveSessions(ctx context.Context, accountID uuid.UUID) ([]*IdentitySession, error) {
+func (q *Queries) ListActiveSessions(ctx context.Context, accountID uuid.UUID) ([]IdentitySession, error) {
 	rows, err := q.db.Query(ctx, listActiveSessions, accountID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []*IdentitySession{}
+	items := []IdentitySession{}
 	for rows.Next() {
 		var i IdentitySession
 		if err := rows.Scan(
@@ -228,7 +228,7 @@ func (q *Queries) ListActiveSessions(ctx context.Context, accountID uuid.UUID) (
 		); err != nil {
 			return nil, err
 		}
-		items = append(items, &i)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -267,7 +267,7 @@ type RevokeSessionParams struct {
 	RevokeReason pgtype.Text `json:"revoke_reason"`
 }
 
-func (q *Queries) RevokeSession(ctx context.Context, arg RevokeSessionParams) (*IdentitySession, error) {
+func (q *Queries) RevokeSession(ctx context.Context, arg RevokeSessionParams) (IdentitySession, error) {
 	row := q.db.QueryRow(ctx, revokeSession, arg.ID, arg.RevokeReason)
 	var i IdentitySession
 	err := row.Scan(
@@ -284,7 +284,7 @@ func (q *Queries) RevokeSession(ctx context.Context, arg RevokeSessionParams) (*
 		&i.Ip,
 		&i.UserAgent,
 	)
-	return &i, err
+	return i, err
 }
 
 const touchSession = `-- name: TouchSession :one
@@ -299,7 +299,7 @@ type TouchSessionParams struct {
 }
 
 // 滑动过期:只推进 idle_expires_at,绝不改 expires_at(绝对过期不因活跃而延长)。
-func (q *Queries) TouchSession(ctx context.Context, arg TouchSessionParams) (*IdentitySession, error) {
+func (q *Queries) TouchSession(ctx context.Context, arg TouchSessionParams) (IdentitySession, error) {
 	row := q.db.QueryRow(ctx, touchSession, arg.ID, arg.IdleExpiresAt)
 	var i IdentitySession
 	err := row.Scan(
@@ -316,5 +316,5 @@ func (q *Queries) TouchSession(ctx context.Context, arg TouchSessionParams) (*Id
 		&i.Ip,
 		&i.UserAgent,
 	)
-	return &i, err
+	return i, err
 }

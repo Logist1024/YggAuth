@@ -27,7 +27,7 @@ const getSetting = `-- name: GetSetting :one
 SELECT key, value, updated_at, updated_by FROM app.setting WHERE key = $1
 `
 
-func (q *Queries) GetSetting(ctx context.Context, key string) (*AppSetting, error) {
+func (q *Queries) GetSetting(ctx context.Context, key string) (AppSetting, error) {
 	row := q.db.QueryRow(ctx, getSetting, key)
 	var i AppSetting
 	err := row.Scan(
@@ -36,20 +36,20 @@ func (q *Queries) GetSetting(ctx context.Context, key string) (*AppSetting, erro
 		&i.UpdatedAt,
 		&i.UpdatedBy,
 	)
-	return &i, err
+	return i, err
 }
 
 const listSettings = `-- name: ListSettings :many
 SELECT key, value, updated_at, updated_by FROM app.setting ORDER BY key
 `
 
-func (q *Queries) ListSettings(ctx context.Context) ([]*AppSetting, error) {
+func (q *Queries) ListSettings(ctx context.Context) ([]AppSetting, error) {
 	rows, err := q.db.Query(ctx, listSettings)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []*AppSetting{}
+	items := []AppSetting{}
 	for rows.Next() {
 		var i AppSetting
 		if err := rows.Scan(
@@ -60,7 +60,7 @@ func (q *Queries) ListSettings(ctx context.Context) ([]*AppSetting, error) {
 		); err != nil {
 			return nil, err
 		}
-		items = append(items, &i)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -82,7 +82,7 @@ type UpsertSettingParams struct {
 	UpdatedBy pgtype.UUID `json:"updated_by"`
 }
 
-func (q *Queries) UpsertSetting(ctx context.Context, arg UpsertSettingParams) (*AppSetting, error) {
+func (q *Queries) UpsertSetting(ctx context.Context, arg UpsertSettingParams) (AppSetting, error) {
 	row := q.db.QueryRow(ctx, upsertSetting, arg.Key, arg.Value, arg.UpdatedBy)
 	var i AppSetting
 	err := row.Scan(
@@ -91,5 +91,5 @@ func (q *Queries) UpsertSetting(ctx context.Context, arg UpsertSettingParams) (*
 		&i.UpdatedAt,
 		&i.UpdatedBy,
 	)
-	return &i, err
+	return i, err
 }

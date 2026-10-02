@@ -25,14 +25,14 @@ RETURNING id, code, email, max_uses, used_count, expires_at, created_by, created
 `
 
 type ConsumeInvitationParams struct {
-	Code    string `json:"code"`
-	Column2 string `json:"column_2"`
+	Code  string      `json:"code"`
+	Email pgtype.Text `json:"email"`
 }
 
 // 核销邀请码。used_count 的上限判断放在条件里,避免读改写竞态。
 // $2 是可选的邮箱绑定:邀请码绑定了邮箱时,只有该邮箱能使用。
-func (q *Queries) ConsumeInvitation(ctx context.Context, arg ConsumeInvitationParams) (*IdentityInvitation, error) {
-	row := q.db.QueryRow(ctx, consumeInvitation, arg.Code, arg.Column2)
+func (q *Queries) ConsumeInvitation(ctx context.Context, arg ConsumeInvitationParams) (IdentityInvitation, error) {
+	row := q.db.QueryRow(ctx, consumeInvitation, arg.Code, arg.Email)
 	var i IdentityInvitation
 	err := row.Scan(
 		&i.ID,
@@ -45,7 +45,7 @@ func (q *Queries) ConsumeInvitation(ctx context.Context, arg ConsumeInvitationPa
 		&i.CreatedAt,
 		&i.RevokedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const createInvitation = `-- name: CreateInvitation :one
@@ -62,7 +62,7 @@ type CreateInvitationParams struct {
 	CreatedBy pgtype.UUID `json:"created_by"`
 }
 
-func (q *Queries) CreateInvitation(ctx context.Context, arg CreateInvitationParams) (*IdentityInvitation, error) {
+func (q *Queries) CreateInvitation(ctx context.Context, arg CreateInvitationParams) (IdentityInvitation, error) {
 	row := q.db.QueryRow(ctx, createInvitation,
 		arg.Code,
 		arg.Email,
@@ -82,7 +82,7 @@ func (q *Queries) CreateInvitation(ctx context.Context, arg CreateInvitationPara
 		&i.CreatedAt,
 		&i.RevokedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const deleteExpiredInvitations = `-- name: DeleteExpiredInvitations :execrows
@@ -102,7 +102,7 @@ SELECT id, code, email, max_uses, used_count, expires_at, created_by, created_at
 WHERE code = $1 AND revoked_at IS NULL AND expires_at > now()
 `
 
-func (q *Queries) GetInvitationByCode(ctx context.Context, code string) (*IdentityInvitation, error) {
+func (q *Queries) GetInvitationByCode(ctx context.Context, code string) (IdentityInvitation, error) {
 	row := q.db.QueryRow(ctx, getInvitationByCode, code)
 	var i IdentityInvitation
 	err := row.Scan(
@@ -116,7 +116,7 @@ func (q *Queries) GetInvitationByCode(ctx context.Context, code string) (*Identi
 		&i.CreatedAt,
 		&i.RevokedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const listInvitations = `-- name: ListInvitations :many
@@ -147,13 +147,13 @@ type ListInvitationsRow struct {
 	CreatedByUsername pgtype.Text        `json:"created_by_username"`
 }
 
-func (q *Queries) ListInvitations(ctx context.Context, arg ListInvitationsParams) ([]*ListInvitationsRow, error) {
+func (q *Queries) ListInvitations(ctx context.Context, arg ListInvitationsParams) ([]ListInvitationsRow, error) {
 	rows, err := q.db.Query(ctx, listInvitations, arg.Column1, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []*ListInvitationsRow{}
+	items := []ListInvitationsRow{}
 	for rows.Next() {
 		var i ListInvitationsRow
 		if err := rows.Scan(
@@ -170,7 +170,7 @@ func (q *Queries) ListInvitations(ctx context.Context, arg ListInvitationsParams
 		); err != nil {
 			return nil, err
 		}
-		items = append(items, &i)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

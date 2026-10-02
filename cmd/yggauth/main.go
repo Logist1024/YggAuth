@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/yggauth/yggauth/internal/config"
-	"github.com/yggauth/yggauth/internal/platform/clock"
 	"github.com/yggauth/yggauth/internal/platform/db"
 	"github.com/yggauth/yggauth/internal/platform/log"
 	"github.com/yggauth/yggauth/internal/platform/metrics"
@@ -119,12 +118,7 @@ func runServe(args []string) error {
 		}
 	}
 
-	rt := transport.New(transport.Deps{
-		Config: cfg,
-		Logger: logger,
-		DB:     pool,
-		Clock:  clock.New(),
-	})
+	rt := transport.New(buildDeps(cfg, logger, pool))
 
 	srv := &http.Server{
 		Addr:              cfg.App.Addr(),

@@ -10,40 +10,39 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const countAuditEvents = `-- name: CountAuditEvents :one
 SELECT count(*) FROM identity.audit_event
-WHERE ($1::uuid IS NULL OR account_id = $1)
-  AND ($2::text IS NULL OR action LIKE $2)
-  AND ($3::text IS NULL OR outcome = $3)
-  AND ($4::timestamptz IS NULL OR occurred_at >= $4)
-  AND ($5::timestamptz IS NULL OR occurred_at <= $5)
-  AND ($6::text IS NULL OR target_type = $6)
-  AND ($7::text IS NULL OR target_id = $7)
+WHERE ($1::uuid IS NULL OR account_id = $1::uuid)
+  AND ($2::text IS NULL OR action LIKE $2::text)
+  AND ($3::text IS NULL OR outcome = $3::text)
+  AND ($4::timestamptz IS NULL OR occurred_at >= $4::timestamptz)
+  AND ($5::timestamptz IS NULL OR occurred_at <= $5::timestamptz)
+  AND ($6::text IS NULL OR target_type = $6::text)
+  AND ($7::text IS NULL OR target_id = $7::text)
 `
 
 type CountAuditEventsParams struct {
-	Column1 uuid.UUID `json:"column_1"`
-	Column2 string    `json:"column_2"`
-	Column3 string    `json:"column_3"`
-	Column4 time.Time `json:"column_4"`
-	Column5 time.Time `json:"column_5"`
-	Column6 string    `json:"column_6"`
-	Column7 string    `json:"column_7"`
+	AccountID  pgtype.UUID        `json:"account_id"`
+	Action     pgtype.Text        `json:"action"`
+	Outcome    pgtype.Text        `json:"outcome"`
+	From       pgtype.Timestamptz `json:"from"`
+	To         pgtype.Timestamptz `json:"to"`
+	TargetType pgtype.Text        `json:"target_type"`
+	TargetID   pgtype.Text        `json:"target_id"`
 }
 
 func (q *Queries) CountAuditEvents(ctx context.Context, arg CountAuditEventsParams) (int64, error) {
 	row := q.db.QueryRow(ctx, countAuditEvents,
-		arg.Column1,
-		arg.Column2,
-		arg.Column3,
-		arg.Column4,
-		arg.Column5,
-		arg.Column6,
-		arg.Column7,
+		arg.AccountID,
+		arg.Action,
+		arg.Outcome,
+		arg.From,
+		arg.To,
+		arg.TargetType,
+		arg.TargetID,
 	)
 	var count int64
 	err := row.Scan(&count)
@@ -66,32 +65,32 @@ const exportAuditEvents = `-- name: ExportAuditEvents :many
 SELECT id, occurred_at, account_id, actor, action, target_type, target_id,
        outcome, ip, user_agent, metadata
 FROM identity.audit_event
-WHERE ($1::timestamptz IS NULL OR occurred_at >= $1)
-  AND ($2::timestamptz IS NULL OR occurred_at <= $2)
+WHERE ($1::timestamptz IS NULL OR occurred_at >= $1::timestamptz)
+  AND ($2::timestamptz IS NULL OR occurred_at <= $2::timestamptz)
 ORDER BY id
-LIMIT $3 OFFSET $4
+LIMIT $4 OFFSET $3
 `
 
 type ExportAuditEventsParams struct {
-	Column1 time.Time `json:"column_1"`
-	Column2 time.Time `json:"column_2"`
-	Limit   int32     `json:"limit"`
-	Offset  int32     `json:"offset"`
+	From   pgtype.Timestamptz `json:"from"`
+	To     pgtype.Timestamptz `json:"to"`
+	Offset int32              `json:"offset"`
+	Limit  int32              `json:"limit"`
 }
 
-// 导出 CSV 用:流式分页,不设上限,但仍走同一组过滤条件。
-func (q *Queries) ExportAuditEvents(ctx context.Context, arg ExportAuditEventsParams) ([]*IdentityAuditEvent, error) {
+// 导出 CSV 用:只按时间窗过滤,规模由调用方控制。
+func (q *Queries) ExportAuditEvents(ctx context.Context, arg ExportAuditEventsParams) ([]IdentityAuditEvent, error) {
 	rows, err := q.db.Query(ctx, exportAuditEvents,
-		arg.Column1,
-		arg.Column2,
-		arg.Limit,
+		arg.From,
+		arg.To,
 		arg.Offset,
+		arg.Limit,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []*IdentityAuditEvent{}
+	items := []IdentityAuditEvent{}
 	for rows.Next() {
 		var i IdentityAuditEvent
 		if err := rows.Scan(
@@ -109,7 +108,7 @@ func (q *Queries) ExportAuditEvents(ctx context.Context, arg ExportAuditEventsPa
 		); err != nil {
 			return nil, err
 		}
-		items = append(items, &i)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -120,7 +119,16 @@ func (q *Queries) ExportAuditEvents(ctx context.Context, arg ExportAuditEventsPa
 const insertAuditEvent = `-- name: InsertAuditEvent :one
 INSERT INTO identity.audit_event (
     account_id, actor, action, target_type, target_id, outcome, ip, user_agent, metadata)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+VALUES (
+    $1::uuid,
+    $2,
+    $3,
+    $4::text,
+    $5::text,
+    $6,
+    $7::inet,
+    $8::text,
+    $9::jsonb)
 RETURNING id, occurred_at, account_id, actor, action, target_type, target_id, outcome, ip, user_agent, metadata
 `
 
@@ -137,7 +145,7 @@ type InsertAuditEventParams struct {
 }
 
 // 审计表只追加,应用层没有任何删除接口(见 docs/09-security.md 9.2)。
-func (q *Queries) InsertAuditEvent(ctx context.Context, arg InsertAuditEventParams) (*IdentityAuditEvent, error) {
+func (q *Queries) InsertAuditEvent(ctx context.Context, arg InsertAuditEventParams) (IdentityAuditEvent, error) {
 	row := q.db.QueryRow(ctx, insertAuditEvent,
 		arg.AccountID,
 		arg.Actor,
@@ -163,52 +171,52 @@ func (q *Queries) InsertAuditEvent(ctx context.Context, arg InsertAuditEventPara
 		&i.UserAgent,
 		&i.Metadata,
 	)
-	return &i, err
+	return i, err
 }
 
 const searchAuditEvents = `-- name: SearchAuditEvents :many
 SELECT id, occurred_at, account_id, actor, action, target_type, target_id, outcome, ip, user_agent, metadata FROM identity.audit_event
-WHERE ($1::uuid IS NULL OR account_id = $1)
-  AND ($2::text IS NULL OR action LIKE $2)
-  AND ($3::text IS NULL OR outcome = $3)
-  AND ($4::timestamptz IS NULL OR occurred_at >= $4)
-  AND ($5::timestamptz IS NULL OR occurred_at <= $5)
-  AND ($6::text IS NULL OR target_type = $6)
-  AND ($7::text IS NULL OR target_id = $7)
+WHERE ($1::uuid IS NULL OR account_id = $1::uuid)
+  AND ($2::text IS NULL OR action LIKE $2::text)
+  AND ($3::text IS NULL OR outcome = $3::text)
+  AND ($4::timestamptz IS NULL OR occurred_at >= $4::timestamptz)
+  AND ($5::timestamptz IS NULL OR occurred_at <= $5::timestamptz)
+  AND ($6::text IS NULL OR target_type = $6::text)
+  AND ($7::text IS NULL OR target_id = $7::text)
 ORDER BY occurred_at DESC, id DESC
-LIMIT $8 OFFSET $9
+LIMIT $9 OFFSET $8
 `
 
 type SearchAuditEventsParams struct {
-	Column1 uuid.UUID `json:"column_1"`
-	Column2 string    `json:"column_2"`
-	Column3 string    `json:"column_3"`
-	Column4 time.Time `json:"column_4"`
-	Column5 time.Time `json:"column_5"`
-	Column6 string    `json:"column_6"`
-	Column7 string    `json:"column_7"`
-	Limit   int32     `json:"limit"`
-	Offset  int32     `json:"offset"`
+	AccountID  pgtype.UUID        `json:"account_id"`
+	Action     pgtype.Text        `json:"action"`
+	Outcome    pgtype.Text        `json:"outcome"`
+	From       pgtype.Timestamptz `json:"from"`
+	To         pgtype.Timestamptz `json:"to"`
+	TargetType pgtype.Text        `json:"target_type"`
+	TargetID   pgtype.Text        `json:"target_id"`
+	Offset     int32              `json:"offset"`
+	Limit      int32              `json:"limit"`
 }
 
-// 后台审计检索。account_id 为 NULL 时不按账号过滤。
-func (q *Queries) SearchAuditEvents(ctx context.Context, arg SearchAuditEventsParams) ([]*IdentityAuditEvent, error) {
+// 后台审计检索。可选参数为 NULL 时不参与过滤。
+func (q *Queries) SearchAuditEvents(ctx context.Context, arg SearchAuditEventsParams) ([]IdentityAuditEvent, error) {
 	rows, err := q.db.Query(ctx, searchAuditEvents,
-		arg.Column1,
-		arg.Column2,
-		arg.Column3,
-		arg.Column4,
-		arg.Column5,
-		arg.Column6,
-		arg.Column7,
-		arg.Limit,
+		arg.AccountID,
+		arg.Action,
+		arg.Outcome,
+		arg.From,
+		arg.To,
+		arg.TargetType,
+		arg.TargetID,
 		arg.Offset,
+		arg.Limit,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []*IdentityAuditEvent{}
+	items := []IdentityAuditEvent{}
 	for rows.Next() {
 		var i IdentityAuditEvent
 		if err := rows.Scan(
@@ -226,7 +234,7 @@ func (q *Queries) SearchAuditEvents(ctx context.Context, arg SearchAuditEventsPa
 		); err != nil {
 			return nil, err
 		}
-		items = append(items, &i)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

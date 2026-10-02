@@ -17,7 +17,7 @@ SELECT * FROM identity.role WHERE code = $1;
 
 -- name: ListRoles :many
 SELECT * FROM identity.role
-WHERE ($1::text IS NULL OR code LIKE $1 OR name LIKE $1)
+WHERE (sqlc.narg('search')::text IS NULL OR code LIKE sqlc.narg('search') OR name LIKE sqlc.narg('search'))
 ORDER BY is_system DESC, code;
 
 -- name: UpdateRole :one

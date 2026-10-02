@@ -14,11 +14,14 @@ RETURNING *;
 SELECT * FROM identity.credential WHERE account_id = $1 AND algo = $2;
 
 -- name: RecordFailedAttempt :one
--- 登录失败计数 +1。达到阈值时同时写 locked_until。
+-- 登录失败计数 +1。达到阈值时把 locked_until 推后 lock_secs 秒。
 UPDATE identity.credential
 SET failed_attempts = failed_attempts + 1,
-    locked_until = CASE WHEN $3 THEN now() + make_interval(secs => $4) ELSE locked_until END
-WHERE account_id = $1 AND algo = $2
+    locked_until = CASE
+        WHEN sqlc.arg('lock')::boolean THEN now() + make_interval(secs => sqlc.arg('lock_secs'))
+        ELSE locked_until
+    END
+WHERE account_id = sqlc.arg('account_id') AND algo = sqlc.arg('algo')
 RETURNING *;
 
 -- name: ResetFailedAttempts :one

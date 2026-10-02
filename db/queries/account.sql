@@ -13,17 +13,7 @@ SELECT * FROM identity.account WHERE lower(email) = lower($1);
 -- name: GetAccountByUsername :one
 SELECT * FROM identity.account WHERE username_lower = $1;
 
--- name: ListAccounts :many
-SELECT * FROM identity.account
-WHERE ($1::text IS NULL OR status = $1)
-  AND ($2::text IS NULL OR username_lower LIKE $2 OR lower(email) LIKE $2)
-ORDER BY created_at DESC
-LIMIT $3 OFFSET $4;
 
--- name: CountAccounts :one
-SELECT count(*) FROM identity.account
-WHERE ($1::text IS NULL OR status = $1)
-  AND ($2::text IS NULL OR username_lower LIKE $2 OR lower(email) LIKE $2);
 
 -- name: UpdateAccountProfile :one
 -- 只改展示层字段。username_lower 由服务层保证同步更新。

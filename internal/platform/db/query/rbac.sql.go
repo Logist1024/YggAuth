@@ -52,7 +52,7 @@ type CreateRoleParams struct {
 	IsSystem    bool        `json:"is_system"`
 }
 
-func (q *Queries) CreateRole(ctx context.Context, arg CreateRoleParams) (*IdentityRole, error) {
+func (q *Queries) CreateRole(ctx context.Context, arg CreateRoleParams) (IdentityRole, error) {
 	row := q.db.QueryRow(ctx, createRole,
 		arg.Code,
 		arg.Name,
@@ -69,7 +69,7 @@ func (q *Queries) CreateRole(ctx context.Context, arg CreateRoleParams) (*Identi
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const deleteRole = `-- name: DeleteRole :execrows
@@ -89,18 +89,18 @@ const getPermission = `-- name: GetPermission :one
 SELECT code, description, created_at FROM identity.permission WHERE code = $1
 `
 
-func (q *Queries) GetPermission(ctx context.Context, code string) (*IdentityPermission, error) {
+func (q *Queries) GetPermission(ctx context.Context, code string) (IdentityPermission, error) {
 	row := q.db.QueryRow(ctx, getPermission, code)
 	var i IdentityPermission
 	err := row.Scan(&i.Code, &i.Description, &i.CreatedAt)
-	return &i, err
+	return i, err
 }
 
 const getRoleByCode = `-- name: GetRoleByCode :one
 SELECT id, code, name, description, is_system, created_at, updated_at FROM identity.role WHERE code = $1
 `
 
-func (q *Queries) GetRoleByCode(ctx context.Context, code string) (*IdentityRole, error) {
+func (q *Queries) GetRoleByCode(ctx context.Context, code string) (IdentityRole, error) {
 	row := q.db.QueryRow(ctx, getRoleByCode, code)
 	var i IdentityRole
 	err := row.Scan(
@@ -112,14 +112,14 @@ func (q *Queries) GetRoleByCode(ctx context.Context, code string) (*IdentityRole
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const getRoleByID = `-- name: GetRoleByID :one
 SELECT id, code, name, description, is_system, created_at, updated_at FROM identity.role WHERE id = $1
 `
 
-func (q *Queries) GetRoleByID(ctx context.Context, id uuid.UUID) (*IdentityRole, error) {
+func (q *Queries) GetRoleByID(ctx context.Context, id uuid.UUID) (IdentityRole, error) {
 	row := q.db.QueryRow(ctx, getRoleByID, id)
 	var i IdentityRole
 	err := row.Scan(
@@ -131,7 +131,7 @@ func (q *Queries) GetRoleByID(ctx context.Context, id uuid.UUID) (*IdentityRole,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const grantRole = `-- name: GrantRole :one
@@ -147,7 +147,7 @@ type GrantRoleParams struct {
 	GrantedBy pgtype.UUID `json:"granted_by"`
 }
 
-func (q *Queries) GrantRole(ctx context.Context, arg GrantRoleParams) (*IdentityAccountRole, error) {
+func (q *Queries) GrantRole(ctx context.Context, arg GrantRoleParams) (IdentityAccountRole, error) {
 	row := q.db.QueryRow(ctx, grantRole, arg.AccountID, arg.RoleID, arg.GrantedBy)
 	var i IdentityAccountRole
 	err := row.Scan(
@@ -156,7 +156,7 @@ func (q *Queries) GrantRole(ctx context.Context, arg GrantRoleParams) (*Identity
 		&i.GrantedAt,
 		&i.GrantedBy,
 	)
-	return &i, err
+	return i, err
 }
 
 const hasPermission = `-- name: HasPermission :one
@@ -216,13 +216,13 @@ WHERE ar.account_id = $1
 ORDER BY r.code
 `
 
-func (q *Queries) ListAccountRoles(ctx context.Context, accountID uuid.UUID) ([]*IdentityRole, error) {
+func (q *Queries) ListAccountRoles(ctx context.Context, accountID uuid.UUID) ([]IdentityRole, error) {
 	rows, err := q.db.Query(ctx, listAccountRoles, accountID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []*IdentityRole{}
+	items := []IdentityRole{}
 	for rows.Next() {
 		var i IdentityRole
 		if err := rows.Scan(
@@ -236,7 +236,7 @@ func (q *Queries) ListAccountRoles(ctx context.Context, accountID uuid.UUID) ([]
 		); err != nil {
 			return nil, err
 		}
-		items = append(items, &i)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -248,19 +248,19 @@ const listPermissions = `-- name: ListPermissions :many
 SELECT code, description, created_at FROM identity.permission ORDER BY code
 `
 
-func (q *Queries) ListPermissions(ctx context.Context) ([]*IdentityPermission, error) {
+func (q *Queries) ListPermissions(ctx context.Context) ([]IdentityPermission, error) {
 	rows, err := q.db.Query(ctx, listPermissions)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []*IdentityPermission{}
+	items := []IdentityPermission{}
 	for rows.Next() {
 		var i IdentityPermission
 		if err := rows.Scan(&i.Code, &i.Description, &i.CreatedAt); err != nil {
 			return nil, err
 		}
-		items = append(items, &i)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -275,13 +275,13 @@ WHERE ar.role_id = $1
 ORDER BY a.created_at DESC
 `
 
-func (q *Queries) ListRoleAccounts(ctx context.Context, roleID uuid.UUID) ([]*IdentityAccount, error) {
+func (q *Queries) ListRoleAccounts(ctx context.Context, roleID uuid.UUID) ([]IdentityAccount, error) {
 	rows, err := q.db.Query(ctx, listRoleAccounts, roleID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []*IdentityAccount{}
+	items := []IdentityAccount{}
 	for rows.Next() {
 		var i IdentityAccount
 		if err := rows.Scan(
@@ -297,7 +297,7 @@ func (q *Queries) ListRoleAccounts(ctx context.Context, roleID uuid.UUID) ([]*Id
 		); err != nil {
 			return nil, err
 		}
-		items = append(items, &i)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -312,19 +312,19 @@ WHERE rp.role_id = $1
 ORDER BY p.code
 `
 
-func (q *Queries) ListRolePermissions(ctx context.Context, roleID uuid.UUID) ([]*IdentityPermission, error) {
+func (q *Queries) ListRolePermissions(ctx context.Context, roleID uuid.UUID) ([]IdentityPermission, error) {
 	rows, err := q.db.Query(ctx, listRolePermissions, roleID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []*IdentityPermission{}
+	items := []IdentityPermission{}
 	for rows.Next() {
 		var i IdentityPermission
 		if err := rows.Scan(&i.Code, &i.Description, &i.CreatedAt); err != nil {
 			return nil, err
 		}
-		items = append(items, &i)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -338,13 +338,13 @@ WHERE ($1::text IS NULL OR code LIKE $1 OR name LIKE $1)
 ORDER BY is_system DESC, code
 `
 
-func (q *Queries) ListRoles(ctx context.Context, dollar_1 string) ([]*IdentityRole, error) {
-	rows, err := q.db.Query(ctx, listRoles, dollar_1)
+func (q *Queries) ListRoles(ctx context.Context, search pgtype.Text) ([]IdentityRole, error) {
+	rows, err := q.db.Query(ctx, listRoles, search)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []*IdentityRole{}
+	items := []IdentityRole{}
 	for rows.Next() {
 		var i IdentityRole
 		if err := rows.Scan(
@@ -358,7 +358,7 @@ func (q *Queries) ListRoles(ctx context.Context, dollar_1 string) ([]*IdentityRo
 		); err != nil {
 			return nil, err
 		}
-		items = append(items, &i)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -407,7 +407,7 @@ type UpdateRoleParams struct {
 }
 
 // is_system 的内置角色不允许改名改 code,避免破坏依赖角色 code 的脚本。
-func (q *Queries) UpdateRole(ctx context.Context, arg UpdateRoleParams) (*IdentityRole, error) {
+func (q *Queries) UpdateRole(ctx context.Context, arg UpdateRoleParams) (IdentityRole, error) {
 	row := q.db.QueryRow(ctx, updateRole, arg.ID, arg.Name, arg.Description)
 	var i IdentityRole
 	err := row.Scan(
@@ -419,5 +419,5 @@ func (q *Queries) UpdateRole(ctx context.Context, arg UpdateRoleParams) (*Identi
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
-	return &i, err
+	return i, err
 }

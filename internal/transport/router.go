@@ -94,14 +94,32 @@ func (rt *Router) Handler() http.Handler {
 	rt.health.Mount(r)
 	r.Handle("GET /metrics", metrics.Handler())
 
-	// 业务路由在对应里程碑挂载:
+	// 业务路由按里程碑逐个挂载:
 	//   M2 → /api/auth/*、/api/account/*
 	//   M3 → /oauth/*、/api/sso/*
 	//   M4 → /mc/*
 	//   M5 → /api/account/mc/*
 	//   M6 → 前端 SPA
+	if rt.deps.Identity.Service != nil {
+		r.Route("/api", func(r chi.Router) {
+			r.Use(rt.sessionAuth)
+			r.Use(httpx.CSRFProtect)
+			rt.deps.Identity.Handler.Mount(r, httpx.RequireAuth)
+			if rt.deps.Admin.Handler != nil {
+				rt.deps.Admin.Handler.Mount(r)
+			}
+		})
+	}
 
 	return r
+}
+
+// sessionAuth 返回会话认证中间件;未装配账号内核时退化为直通。
+func (rt *Router) sessionAuth(next http.Handler) http.Handler {
+	if rt.deps.Identity.Service == nil {
+		return next
+	}
+	return SessionAuth(rt.deps.Identity.Service, rt.deps.Identity.Cookie)(next)
 }
 
 // metricsMiddleware 把 HTTP 指标接进 Prometheus。

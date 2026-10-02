@@ -72,26 +72,26 @@
 **目标**:域中立的身份能力。**不含任何 OIDC / MC 语义**。
 
 ### 数据模型
-- [ ] `account` 表(含 `email`、`username`、`email_verified_at`、`status`、`mc_login_enabled`)
-- [ ] `credential` 表(argon2id hash,支持未来多种算法)
-- [ ] `session` 表(**统一模型**,见 [04-decisions.md](./04-decisions.md) ADR-004)
-- [ ] `role` / `permission` / `role_permission` / `account_role`(**单一 RBAC**,ADR-005)
-- [ ] `audit_event` 表
+- [x] `account` 表(含 `email`、`username`、`email_verified_at`、`status`、`mc_login_enabled`)
+- [x] `credential` 表(argon2id hash,支持未来多种算法)
+- [x] `session` 表(**统一模型**,见 [04-decisions.md](./04-decisions.md) ADR-004)
+- [x] `role` / `permission` / `role_permission` / `account_role`(**单一 RBAC**,ADR-005)
+- [x] `audit_event` 表
 
 ### 功能
-- [ ] 注册:邮箱格式校验、用户名唯一性、密码策略(8–128)、邮箱验证令牌
-- [ ] 登录:argon2id 校验、失败锁定(N 次 / M 分钟)、会话签发
-- [ ] 会话:滑动过期、绝对过期、登出、列出活跃会话、踢下线
-- [ ] 密码重置:请求(不泄露账号是否存在)→ 邮件令牌 → 重置
-- [ ] 邮件验证:令牌 + 重发冷却
-- [ ] RBAC:角色 CRUD、授权 / 撤权、权限点求值
-- [ ] 审计:关键事件落库,支持按主体/动作/时间检索
+- [x] 注册:邮箱格式校验、用户名唯一性、密码策略(8–128)、邮箱验证令牌
+- [x] 登录:argon2id 校验、失败锁定(N 次 / M 分钟)、会话签发
+- [x] 会话:滑动过期、绝对过期、登出、列出活跃会话、踢下线
+- [x] 密码重置:请求(不泄露账号是否存在)→ 邮件令牌 → 重置
+- [x] 邮件验证:令牌 + 重发冷却
+- [x] RBAC:角色 CRUD、授权 / 撤权、权限点求值
+- [x] 审计:关键事件落库,支持按主体/动作/时间检索
 
 ### 单元测试
-- [ ] 密码策略边界(7 位 / 8 位 / 128 位 / 129 位)
-- [ ] 账号锁定与解锁
-- [ ] 会话过期逻辑(用 `clock` mock)
-- [ ] RBAC 权限求值(含通配符)
+- [x] 密码策略边界(7 位 / 8 位 / 128 位 / 129 位)
+- [x] 账号锁定与解锁
+- [x] 会话过期逻辑(用 `clock` mock)
+- [x] RBAC 权限求值(含通配符)
 
 **验收**:注册 → 登录 → 拿到会话 → 访问受保护接口全链路通,单测覆盖关键路径。
 

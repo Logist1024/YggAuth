@@ -16,7 +16,7 @@ WHERE code = $1
   AND revoked_at IS NULL
   AND expires_at > now()
   AND used_count < max_uses
-  AND ($2::text IS NULL OR email IS NULL OR lower(email) = lower($2))
+  AND (sqlc.narg('email')::text IS NULL OR email IS NULL OR lower(email) = lower(sqlc.narg('email')))
 RETURNING *;
 
 -- name: ListInvitations :many

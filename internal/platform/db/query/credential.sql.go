@@ -9,7 +9,6 @@ import (
 	"context"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const getCredential = `-- name: GetCredential :one
@@ -21,7 +20,7 @@ type GetCredentialParams struct {
 	Algo      string    `json:"algo"`
 }
 
-func (q *Queries) GetCredential(ctx context.Context, arg GetCredentialParams) (*IdentityCredential, error) {
+func (q *Queries) GetCredential(ctx context.Context, arg GetCredentialParams) (IdentityCredential, error) {
 	row := q.db.QueryRow(ctx, getCredential, arg.AccountID, arg.Algo)
 	var i IdentityCredential
 	err := row.Scan(
@@ -34,31 +33,34 @@ func (q *Queries) GetCredential(ctx context.Context, arg GetCredentialParams) (*
 		&i.LockedUntil,
 		&i.ChangedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const recordFailedAttempt = `-- name: RecordFailedAttempt :one
 UPDATE identity.credential
 SET failed_attempts = failed_attempts + 1,
-    locked_until = CASE WHEN $3 THEN now() + make_interval(secs => $4) ELSE locked_until END
-WHERE account_id = $1 AND algo = $2
+    locked_until = CASE
+        WHEN $1::boolean THEN now() + make_interval(secs => $2)
+        ELSE locked_until
+    END
+WHERE account_id = $3 AND algo = $4
 RETURNING id, account_id, algo, hash, params, failed_attempts, locked_until, changed_at
 `
 
 type RecordFailedAttemptParams struct {
-	AccountID   uuid.UUID          `json:"account_id"`
-	Algo        string             `json:"algo"`
-	LockedUntil pgtype.Timestamptz `json:"locked_until"`
-	Secs        float64            `json:"secs"`
+	Lock      bool      `json:"lock"`
+	LockSecs  float64   `json:"lock_secs"`
+	AccountID uuid.UUID `json:"account_id"`
+	Algo      string    `json:"algo"`
 }
 
-// 登录失败计数 +1。达到阈值时同时写 locked_until。
-func (q *Queries) RecordFailedAttempt(ctx context.Context, arg RecordFailedAttemptParams) (*IdentityCredential, error) {
+// 登录失败计数 +1。达到阈值时把 locked_until 推后 lock_secs 秒。
+func (q *Queries) RecordFailedAttempt(ctx context.Context, arg RecordFailedAttemptParams) (IdentityCredential, error) {
 	row := q.db.QueryRow(ctx, recordFailedAttempt,
+		arg.Lock,
+		arg.LockSecs,
 		arg.AccountID,
 		arg.Algo,
-		arg.LockedUntil,
-		arg.Secs,
 	)
 	var i IdentityCredential
 	err := row.Scan(
@@ -71,7 +73,7 @@ func (q *Queries) RecordFailedAttempt(ctx context.Context, arg RecordFailedAttem
 		&i.LockedUntil,
 		&i.ChangedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const resetFailedAttempts = `-- name: ResetFailedAttempts :one
@@ -87,7 +89,7 @@ type ResetFailedAttemptsParams struct {
 }
 
 // 登录成功后清零。
-func (q *Queries) ResetFailedAttempts(ctx context.Context, arg ResetFailedAttemptsParams) (*IdentityCredential, error) {
+func (q *Queries) ResetFailedAttempts(ctx context.Context, arg ResetFailedAttemptsParams) (IdentityCredential, error) {
 	row := q.db.QueryRow(ctx, resetFailedAttempts, arg.AccountID, arg.Algo)
 	var i IdentityCredential
 	err := row.Scan(
@@ -100,7 +102,7 @@ func (q *Queries) ResetFailedAttempts(ctx context.Context, arg ResetFailedAttemp
 		&i.LockedUntil,
 		&i.ChangedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const touchCredentialChangedAt = `-- name: TouchCredentialChangedAt :exec
@@ -137,7 +139,7 @@ type UpsertCredentialParams struct {
 }
 
 // 每账号每算法一条(UNIQUE(account_id, algo)),支持多算法并存迁移。
-func (q *Queries) UpsertCredential(ctx context.Context, arg UpsertCredentialParams) (*IdentityCredential, error) {
+func (q *Queries) UpsertCredential(ctx context.Context, arg UpsertCredentialParams) (IdentityCredential, error) {
 	row := q.db.QueryRow(ctx, upsertCredential,
 		arg.AccountID,
 		arg.Algo,
@@ -155,5 +157,5 @@ func (q *Queries) UpsertCredential(ctx context.Context, arg UpsertCredentialPara
 		&i.LockedUntil,
 		&i.ChangedAt,
 	)
-	return &i, err
+	return i, err
 }

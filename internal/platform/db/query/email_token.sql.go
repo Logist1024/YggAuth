@@ -19,7 +19,7 @@ RETURNING id, account_id, token_hash, purpose, expires_at, used_at, created_at
 `
 
 // 一次性使用:条件里带 used_at IS NULL,天然防重放。
-func (q *Queries) ConsumeEmailToken(ctx context.Context, tokenHash []byte) (*IdentityEmailToken, error) {
+func (q *Queries) ConsumeEmailToken(ctx context.Context, tokenHash []byte) (IdentityEmailToken, error) {
 	row := q.db.QueryRow(ctx, consumeEmailToken, tokenHash)
 	var i IdentityEmailToken
 	err := row.Scan(
@@ -31,7 +31,7 @@ func (q *Queries) ConsumeEmailToken(ctx context.Context, tokenHash []byte) (*Ide
 		&i.UsedAt,
 		&i.CreatedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const countEmailTokensSince = `-- name: CountEmailTokensSince :one
@@ -66,7 +66,7 @@ type CreateEmailTokenParams struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-func (q *Queries) CreateEmailToken(ctx context.Context, arg CreateEmailTokenParams) (*IdentityEmailToken, error) {
+func (q *Queries) CreateEmailToken(ctx context.Context, arg CreateEmailTokenParams) (IdentityEmailToken, error) {
 	row := q.db.QueryRow(ctx, createEmailToken,
 		arg.AccountID,
 		arg.TokenHash,
@@ -83,7 +83,7 @@ func (q *Queries) CreateEmailToken(ctx context.Context, arg CreateEmailTokenPara
 		&i.UsedAt,
 		&i.CreatedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const deleteExpiredEmailTokens = `-- name: DeleteExpiredEmailTokens :execrows
@@ -106,7 +106,7 @@ WHERE token_hash = $1
 `
 
 // 只取未使用且未过期的。校验和标记使用在同一个事务里完成。
-func (q *Queries) GetEmailTokenByHash(ctx context.Context, tokenHash []byte) (*IdentityEmailToken, error) {
+func (q *Queries) GetEmailTokenByHash(ctx context.Context, tokenHash []byte) (IdentityEmailToken, error) {
 	row := q.db.QueryRow(ctx, getEmailTokenByHash, tokenHash)
 	var i IdentityEmailToken
 	err := row.Scan(
@@ -118,7 +118,7 @@ func (q *Queries) GetEmailTokenByHash(ctx context.Context, tokenHash []byte) (*I
 		&i.UsedAt,
 		&i.CreatedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const getLastEmailToken = `-- name: GetLastEmailToken :one
@@ -134,7 +134,7 @@ type GetLastEmailTokenParams struct {
 }
 
 // 邮件重发冷却:看最近一次发信时间。
-func (q *Queries) GetLastEmailToken(ctx context.Context, arg GetLastEmailTokenParams) (*IdentityEmailToken, error) {
+func (q *Queries) GetLastEmailToken(ctx context.Context, arg GetLastEmailTokenParams) (IdentityEmailToken, error) {
 	row := q.db.QueryRow(ctx, getLastEmailToken, arg.AccountID, arg.Purpose)
 	var i IdentityEmailToken
 	err := row.Scan(
@@ -146,7 +146,7 @@ func (q *Queries) GetLastEmailToken(ctx context.Context, arg GetLastEmailTokenPa
 		&i.UsedAt,
 		&i.CreatedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const invalidateEmailTokens = `-- name: InvalidateEmailTokens :execrows

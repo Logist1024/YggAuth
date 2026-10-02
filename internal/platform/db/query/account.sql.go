@@ -11,24 +11,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const countAccounts = `-- name: CountAccounts :one
-SELECT count(*) FROM identity.account
-WHERE ($1::text IS NULL OR status = $1)
-  AND ($2::text IS NULL OR username_lower LIKE $2 OR lower(email) LIKE $2)
-`
-
-type CountAccountsParams struct {
-	Column1 string `json:"column_1"`
-	Column2 string `json:"column_2"`
-}
-
-func (q *Queries) CountAccounts(ctx context.Context, arg CountAccountsParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countAccounts, arg.Column1, arg.Column2)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const createAccount = `-- name: CreateAccount :one
 INSERT INTO identity.account (username, username_lower, email, status, mc_login_enabled)
 VALUES ($1, $2, $3, $4, $5)
@@ -43,7 +25,7 @@ type CreateAccountParams struct {
 	McLoginEnabled bool   `json:"mc_login_enabled"`
 }
 
-func (q *Queries) CreateAccount(ctx context.Context, arg CreateAccountParams) (*IdentityAccount, error) {
+func (q *Queries) CreateAccount(ctx context.Context, arg CreateAccountParams) (IdentityAccount, error) {
 	row := q.db.QueryRow(ctx, createAccount,
 		arg.Username,
 		arg.UsernameLower,
@@ -63,7 +45,7 @@ func (q *Queries) CreateAccount(ctx context.Context, arg CreateAccountParams) (*
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const deleteAccount = `-- name: DeleteAccount :execrows
@@ -83,7 +65,7 @@ SELECT id, username, username_lower, email, status, mc_login_enabled, email_veri
 `
 
 // 邮箱唯一性按 lower(email) 判断(变更 C-10),登录/找回密码都走这里。
-func (q *Queries) GetAccountByEmail(ctx context.Context, lower string) (*IdentityAccount, error) {
+func (q *Queries) GetAccountByEmail(ctx context.Context, lower string) (IdentityAccount, error) {
 	row := q.db.QueryRow(ctx, getAccountByEmail, lower)
 	var i IdentityAccount
 	err := row.Scan(
@@ -97,14 +79,14 @@ func (q *Queries) GetAccountByEmail(ctx context.Context, lower string) (*Identit
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const getAccountByID = `-- name: GetAccountByID :one
 SELECT id, username, username_lower, email, status, mc_login_enabled, email_verified_at, created_at, updated_at FROM identity.account WHERE id = $1
 `
 
-func (q *Queries) GetAccountByID(ctx context.Context, id uuid.UUID) (*IdentityAccount, error) {
+func (q *Queries) GetAccountByID(ctx context.Context, id uuid.UUID) (IdentityAccount, error) {
 	row := q.db.QueryRow(ctx, getAccountByID, id)
 	var i IdentityAccount
 	err := row.Scan(
@@ -118,14 +100,14 @@ func (q *Queries) GetAccountByID(ctx context.Context, id uuid.UUID) (*IdentityAc
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const getAccountByUsername = `-- name: GetAccountByUsername :one
 SELECT id, username, username_lower, email, status, mc_login_enabled, email_verified_at, created_at, updated_at FROM identity.account WHERE username_lower = $1
 `
 
-func (q *Queries) GetAccountByUsername(ctx context.Context, usernameLower string) (*IdentityAccount, error) {
+func (q *Queries) GetAccountByUsername(ctx context.Context, usernameLower string) (IdentityAccount, error) {
 	row := q.db.QueryRow(ctx, getAccountByUsername, usernameLower)
 	var i IdentityAccount
 	err := row.Scan(
@@ -139,57 +121,7 @@ func (q *Queries) GetAccountByUsername(ctx context.Context, usernameLower string
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
-	return &i, err
-}
-
-const listAccounts = `-- name: ListAccounts :many
-SELECT id, username, username_lower, email, status, mc_login_enabled, email_verified_at, created_at, updated_at FROM identity.account
-WHERE ($1::text IS NULL OR status = $1)
-  AND ($2::text IS NULL OR username_lower LIKE $2 OR lower(email) LIKE $2)
-ORDER BY created_at DESC
-LIMIT $3 OFFSET $4
-`
-
-type ListAccountsParams struct {
-	Column1 string `json:"column_1"`
-	Column2 string `json:"column_2"`
-	Limit   int32  `json:"limit"`
-	Offset  int32  `json:"offset"`
-}
-
-func (q *Queries) ListAccounts(ctx context.Context, arg ListAccountsParams) ([]*IdentityAccount, error) {
-	rows, err := q.db.Query(ctx, listAccounts,
-		arg.Column1,
-		arg.Column2,
-		arg.Limit,
-		arg.Offset,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []*IdentityAccount{}
-	for rows.Next() {
-		var i IdentityAccount
-		if err := rows.Scan(
-			&i.ID,
-			&i.Username,
-			&i.UsernameLower,
-			&i.Email,
-			&i.Status,
-			&i.McLoginEnabled,
-			&i.EmailVerifiedAt,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, &i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
+	return i, err
 }
 
 const setAccountEmailVerified = `-- name: SetAccountEmailVerified :one
@@ -199,7 +131,7 @@ WHERE id = $1
 RETURNING id, username, username_lower, email, status, mc_login_enabled, email_verified_at, created_at, updated_at
 `
 
-func (q *Queries) SetAccountEmailVerified(ctx context.Context, id uuid.UUID) (*IdentityAccount, error) {
+func (q *Queries) SetAccountEmailVerified(ctx context.Context, id uuid.UUID) (IdentityAccount, error) {
 	row := q.db.QueryRow(ctx, setAccountEmailVerified, id)
 	var i IdentityAccount
 	err := row.Scan(
@@ -213,7 +145,7 @@ func (q *Queries) SetAccountEmailVerified(ctx context.Context, id uuid.UUID) (*I
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const setMCLoginEnabled = `-- name: SetMCLoginEnabled :one
@@ -226,7 +158,7 @@ type SetMCLoginEnabledParams struct {
 }
 
 // mc_login_enabled 是通用布尔开关,内核不理解其业务语义(见迁移注释)。
-func (q *Queries) SetMCLoginEnabled(ctx context.Context, arg SetMCLoginEnabledParams) (*IdentityAccount, error) {
+func (q *Queries) SetMCLoginEnabled(ctx context.Context, arg SetMCLoginEnabledParams) (IdentityAccount, error) {
 	row := q.db.QueryRow(ctx, setMCLoginEnabled, arg.ID, arg.McLoginEnabled)
 	var i IdentityAccount
 	err := row.Scan(
@@ -240,7 +172,7 @@ func (q *Queries) SetMCLoginEnabled(ctx context.Context, arg SetMCLoginEnabledPa
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const updateAccountProfile = `-- name: UpdateAccountProfile :one
@@ -258,7 +190,7 @@ type UpdateAccountProfileParams struct {
 }
 
 // 只改展示层字段。username_lower 由服务层保证同步更新。
-func (q *Queries) UpdateAccountProfile(ctx context.Context, arg UpdateAccountProfileParams) (*IdentityAccount, error) {
+func (q *Queries) UpdateAccountProfile(ctx context.Context, arg UpdateAccountProfileParams) (IdentityAccount, error) {
 	row := q.db.QueryRow(ctx, updateAccountProfile,
 		arg.ID,
 		arg.Username,
@@ -277,7 +209,7 @@ func (q *Queries) UpdateAccountProfile(ctx context.Context, arg UpdateAccountPro
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
-	return &i, err
+	return i, err
 }
 
 const updateAccountStatus = `-- name: UpdateAccountStatus :one
@@ -289,7 +221,7 @@ type UpdateAccountStatusParams struct {
 	Status string    `json:"status"`
 }
 
-func (q *Queries) UpdateAccountStatus(ctx context.Context, arg UpdateAccountStatusParams) (*IdentityAccount, error) {
+func (q *Queries) UpdateAccountStatus(ctx context.Context, arg UpdateAccountStatusParams) (IdentityAccount, error) {
 	row := q.db.QueryRow(ctx, updateAccountStatus, arg.ID, arg.Status)
 	var i IdentityAccount
 	err := row.Scan(
@@ -303,5 +235,5 @@ func (q *Queries) UpdateAccountStatus(ctx context.Context, arg UpdateAccountStat
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
-	return &i, err
+	return i, err
 }
