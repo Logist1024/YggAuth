@@ -841,3 +841,15 @@ func (s *Service) GameLoginEnabled(ctx context.Context, accountID uuid.UUID) (bo
 	}
 	return acc.MCLoginEnabled, nil
 }
+
+// Policy 返回当前生效的密码强度策略。
+//
+// 暴露它是为了让前端**不抄**一份校验规则:策略变了(比如把最小长度
+// 从 8 提到 12),前端应当自动跟着变,而不是继续提示「至少 8 位」
+// 然后被后端拒绝。
+func (s *Service) Policy() Policy { return s.cfg.Policy }
+
+// RegistrationMode 返回当前注册模式(open / invite_only / closed)。
+//
+// 前端据此决定要不要显示「注册」入口。
+func (s *Service) RegistrationMode() string { return s.cfg.RegistrationMode }

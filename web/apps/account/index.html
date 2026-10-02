@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 内联脚本在前:主题要在样式加载前定下来,否则会闪一下默认色 -->
+    <script>
+      (function () {
+        var raw = new URLSearchParams(location.search).get('client_id')
+        var clientId = raw === 'mc' ? 'mc' : 'app'
+        var primary = clientId === 'mc' ? '#5a8f3c' : '#3b6ea5'
+        document.documentElement.style.setProperty('--brand-primary', primary)
+        document.title =
+          clientId === 'mc' ? 'YggAuth · Minecraft 登录' : 'YggAuth · 账号中心'
+      })()
+    </script>
+    <style>
+      html { --brand-primary: #3b6ea5; }
+      body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

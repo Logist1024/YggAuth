@@ -5,9 +5,15 @@ node_modules/
 # 构建产物
 bin/
 /yggauth
-dist/
+
+# 规则只忽略 web/dist(Vite 的中间输出目录)。
+# internal/webserver/dist 里的产物是 go:embed 的输入,必须入库 ——
+# 漏掉它,新克隆的仓库直接 go build 就会因为找不到嵌入文件而失败。
 web/dist/
 web/*/dist/
+
+# 仅按路径前缀匹配 dist/,而不是全局匹配
+/dist/
 
 # 运行时数据(皮肤文件、备份、上传缓存)
 data/

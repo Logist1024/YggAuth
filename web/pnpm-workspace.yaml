@@ -1,0 +1,10 @@
+packages:
+  - 'shared'
+  - 'apps/*'
+
+# pnpm 11 把「允许哪些包跑安装脚本」收进 workspace 配置。
+# esbuild 必须构建:Vite 靠它的原生二进制启动,跳过时报的却是
+# 「找不到 esbuild」,与真正的依赖缺失一模一样。
+allowBuilds:
+  esbuild: true
+  core-js: true

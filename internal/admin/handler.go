@@ -47,6 +47,12 @@ const (
 	PermSettingWrite    = "setting:write"
 	PermOIDCClientRead  = "oidc:client:read"
 	PermOIDCClientWrite = "oidc:client:write"
+	PermMCProfileRead   = "minecraft:profile:read"
+	PermMCProfileWrite  = "minecraft:profile:write"
+	PermMCTextureRead   = "minecraft:texture:read"
+	PermMCTextureWrite  = "minecraft:texture:write"
+	PermServerRead      = "minecraft:server:read"
+	PermServerWrite     = "minecraft:server:write"
 )
 
 // Deps 是后台接口的依赖。

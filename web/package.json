@@ -1,0 +1,13 @@
+{
+  "name": "yggauth-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter './apps/*' dev",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "build": "pnpm --filter @yggauth/account-web build && pnpm --filter @yggauth/admin-web build"
+  }
+}

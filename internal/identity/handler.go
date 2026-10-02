@@ -34,6 +34,7 @@ type CookieConfig struct {
 // Handler 是账号内核的 HTTP 处理器。
 type Handler struct {
 	svc    *Service
+	policy account.Policy
 	cookie CookieConfig
 	base   string
 }
@@ -41,12 +42,15 @@ type Handler struct {
 // NewHandler 创建账号内核的 HTTP 处理器。
 func NewHandler(svc *Service, cookie CookieConfig, publicBaseURL string) *Handler {
 	base := strings.TrimRight(publicBaseURL, "/")
-	return &Handler{svc: svc, cookie: cookie, base: base}
+	// 策略直接取自服务,而不是重新构造一份:两处各写一遍默认值,
+	// 迟早会因为只改了一处而让前端按旧规则提示用户。
+	return &Handler{svc: svc, policy: svc.Accounts.Policy(), cookie: cookie, base: base}
 }
 
 // Mount 把账号内核的路由挂到 r 上。
 func (h *Handler) Mount(r chi.Router, requireAuth func(http.Handler) http.Handler) {
 	r.Route("/auth", func(r chi.Router) {
+		r.Get("/policy", h.Policy)
 		r.Post("/register", h.Register)
 		r.Post("/login", h.Login)
 		r.Post("/password/forgot", h.ForgotPassword)
@@ -561,3 +565,24 @@ func mustAccountID(r *http.Request) uuid.UUID {
 	}
 	return uuid.Nil
 }
+
+// Policy 返回前端需要的账号内核约束。
+//
+// 公开、无需鉴权:注册页在登录之前就要用这些规则。
+// 只暴露**约束**,不暴露任何配置细节(存储位置、算法参数)。
+func (h *Handler) Policy(w http.ResponseWriter, _ *http.Request) {
+	httpx.OK(w, map[string]any{
+		"password_min_length":        h.policy.MinLength,
+		"password_max_length":        h.policy.MaxLength,
+		"password_reject_common":     h.policy.RejectCommon,
+		"username_min_length":        usernameMinLength,
+		"username_max_length":        usernameMaxLength,
+		"registration_mode":          h.svc.Accounts.RegistrationMode(),
+		"require_email_verification": true,
+	})
+}
+
+const (
+	usernameMinLength = 3
+	usernameMaxLength = 32
+)

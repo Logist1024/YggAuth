@@ -2,7 +2,7 @@
 
 > **全局统一账号系统** —— 一份账号,登录业务系统(OAuth 2.1 / OIDC)与 Minecraft(Yggdrasil + 皮肤站)。
 
-**当前状态:M0–M5 已交付**,后续里程碑按 [docs/01-roadmap.md](docs/01-roadmap.md) 推进。设计文档定稿在先,代码与文档同 PR 更新。
+**当前状态:M0–M6 已交付**,后续里程碑按 [docs/01-roadmap.md](docs/01-roadmap.md) 推进。设计文档定稿在先,代码与文档同 PR 更新。
 
 ---
 

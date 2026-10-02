@@ -15,6 +15,7 @@ import (
 	"github.com/yggauth/yggauth/internal/platform/health"
 	"github.com/yggauth/yggauth/internal/platform/httpx"
 	"github.com/yggauth/yggauth/internal/platform/metrics"
+	"github.com/yggauth/yggauth/internal/webserver"
 )
 
 // Deps 是路由装配所需的依赖。
@@ -140,6 +141,13 @@ func (rt *Router) Handler() http.Handler {
 	if rt.deps.OIDC.Handler != nil {
 		r.Route("/oauth", rt.deps.OIDC.Handler.Mount)
 	}
+
+	// 静态资源最后挂。
+	//
+	// SPA 的回退 handler 接受任意路径,放在 API 之前会把
+	// /oauth/token、/api/auth/login 这类请求也吞成 index.html ——
+	// 症状是「后端接口全返回 HTML」,极难定位。
+	webserver.Mount(r)
 
 	return r
 }
