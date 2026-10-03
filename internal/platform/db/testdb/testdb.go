@@ -74,7 +74,10 @@ func start(ctx context.Context) (*Instance, error) {
 		Password("yggauth_test").
 		RuntimePath(filepath.Join(root, "run")).
 		DataPath(filepath.Join(root, "data")).
-		BinariesPath(binDir()).
+		// 归档(~15MB)走跨进程共享的缓存,解压目录按实例隔离。
+		// 两者分开是因为库的并发安全只在归档那一层成立。
+		CachePath(cacheDir()).
+		BinariesPath(binDir(root)).
 		StartTimeout(3 * time.Minute).
 		// 本机 /dev/shm 只有 64MB,PostgreSQL 默认的 posix 动态共享内存在
 		// initdb 阶段就会耗尽它并报 "No space left on device"。
@@ -199,8 +202,12 @@ func NewPool(t *testing.T) *db.Pool {
 //
 // 用固定的、可写的目录而不是每次新建临时目录:二进制只需要下载一次,
 // 后续跑测试直接复用,省掉每次几秒到几十秒的下载。
-func binDir() string {
-	base := os.Getenv("YGG_TEST_PG_BIN_DIR")
+// cacheDir 是**跨进程共享**的归档缓存目录,存放下载下来的 PostgreSQL 压缩包。
+//
+// 共享是安全的:embedded-postgres 下载时先写临时文件再原子 rename,
+// 库自己的注释就写明这是为多进程并发下载设计的。
+func cacheDir() string {
+	base := os.Getenv("YGG_TEST_PG_CACHE_DIR")
 	if base == "" {
 		cache, err := os.UserCacheDir()
 		if err != nil {
@@ -208,6 +215,33 @@ func binDir() string {
 		}
 		base = filepath.Join(cache, "yggauth-test-pg")
 	}
+	_ = os.MkdirAll(base, 0o755)
+	return base
+}
+
+// 解压目录按实例隔离。
+//
+// 为什么不能跨包共享:embedded-postgres 是**逐个文件**解压的
+// (单个文件 temp+rename,但整个目录不是原子的)。go test 把每个包跑成
+// 独立进程,而 sync.Once 只在进程内生效 —— 于是多个包会同时往同一个目录
+// 解压。抢输的那个进程可能刚解压到 initdb 就执行它,而 postgres 还没轮到:
+//
+//	initdb: error: program "postgres" is needed by initdb but was not found
+//
+// 症状极具迷惑性:归档完整(校验和通过),initdb 也在,唯独 postgres 缺失。
+// 本机几乎复现不了(解压时序不同),CI 上稳定复现。
+//
+// 放在实例自己的临时根下而不是缓存目录:缓存目录没人清理,而这个目录
+// 和实例的数据、运行目录同生共死。代价是每个实例多解压一次到 /tmp,
+// 但 PG 的数据目录本来就在那儿。
+func binDir(root string) string {
+	// YGG_TEST_PG_BIN_DIR 指向一份已解压好的预置二进制时按用户给的来。
+	// 那份目录是只读的,不存在并发写。
+	if base := os.Getenv("YGG_TEST_PG_BIN_DIR"); base != "" {
+		_ = os.MkdirAll(base, 0o755)
+		return base
+	}
+	base := filepath.Join(root, "bin")
 	_ = os.MkdirAll(base, 0o755)
 	return base
 }
