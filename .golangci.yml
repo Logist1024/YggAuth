@@ -43,6 +43,15 @@ linters:
       - path: internal/platform/db/query/
         linters:
           - all
+      # handler 里未使用参数很常见,单独放宽
+      #
+      # 这条原先写在 issues.exclude-rules 下 —— 那是 v1 的位置。
+      # v2 把排除规则统一收进 linters.exclusions.rules。v2.6.2 还不校验 schema,
+      # 到 v2.14.0 的 `config verify` 会直接拒绝整个配置,报「含有非法元素」
+      # 却不指出是哪个键,看着像配置本身写坏了。
+      - linters:
+          - revive
+        text: "unused-parameter"
 
 formatters:
   enable:
@@ -56,7 +65,3 @@ formatters:
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-rules:
-    # handler 里未使用参数很常见,单独放宽
-    - linters: [revive]
-      text: "unused-parameter"
