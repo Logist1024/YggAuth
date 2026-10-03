@@ -1,0 +1,14 @@
+{
+  // shared 是纯 TypeScript 包(没有 .vue 文件),所以 typecheck 用 tsc 即可,
+  // 不需要 apps/* 那个 vue-tsc —— 它会把 SFC 编译器一起拖进来,纯属浪费。
+  //
+  // 这个文件之前根本不存在,而 shared/package.json 的 typecheck 脚本一直在
+  // 引用它 —— 脚本从来没能跑起来过。
+  // 注意层级:shared 在 web/shared/,而 tsconfig.base.json 在 web/ —— 只上溯一级。
+  // apps/account 在 web/apps/account/,才需要上溯两级。
+  // 写错层数时 tsc 不会报「找不到 extends」,而是静默退回 ES5 默认配置,
+  // 于是一堆 "Property 'includes' does not exist on type 'string[]'" 冒出来 ——
+  // 症状与真实的类型错误毫无关系。
+  "extends": "../tsconfig.base.json",
+  "include": ["src/**/*.ts"]
+}

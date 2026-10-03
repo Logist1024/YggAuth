@@ -37,7 +37,10 @@ async function load(): Promise<void> {
     })
     for (const [key, value] of Object.entries(query)) {
       if (key !== 'limit' && key !== 'offset' && value) {
-        params.set(key, value)
+        // Object.entries 的值类型是 string | number(query 里 limit/offset 是数字),
+        // TS 无法通过 key 判断收窄。运行到这里 value 必然已是字符串,
+        // 但 String() 让这件事不依赖推断 —— 它对字符串是恒等变换。
+        params.set(key, String(value))
       }
     }
     const data = await store.api.get<{ events: AuditEvent[]; total: number }>(
@@ -63,7 +66,8 @@ function exportCSV(): void {
   const params = new URLSearchParams({ limit: '10000' })
   for (const [key, value] of Object.entries(query)) {
     if (key !== 'limit' && key !== 'offset' && value) {
-      params.set(key, value)
+      // 同 load():值类型是 string | number,显式转字符串。
+      params.set(key, String(value))
     }
   }
   window.location.href = `/api/admin/audit/export?${params.toString()}`

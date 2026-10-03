@@ -83,7 +83,16 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.6.2
+          # 必须选**用 Go 1.27 构建**的版本。go.mod 声明 go 1.27,而 golangci-lint
+          # 拒绝分析目标版本高于自身构建版本的代码,直接报:
+          #   can't load config: the Go language version (go1.25) used to build
+          #   golangci-lint is lower than the targeted Go version (1.27)
+          # 这个失败发生在**加载配置阶段**,一行代码都还没扫 —— 报错信息里
+          # 没有任何文件名,不查版本号根本看不出是版本不匹配。
+          #
+          # v2.13.0(2026-08-19)起改用 Go 1.27 构建。升级时先确认:
+          #   golangci-lint version   # 输出里有 "built with go1.27.x"
+          version: v2.14.0
 
       - uses: pnpm/action-setup@v4
         with:
