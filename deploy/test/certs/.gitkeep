@@ -1,0 +1,10 @@
+# 这个目录在仓库里只有这个占位文件。
+#
+# 用途:compose 覆盖层把这里挂到容器的 /etc/nginx/certs。
+# 目录不存在时 docker 会**静默创建一个空的** —— 报错要等到
+# nginx 启动时,信息只剩「cannot load certificate ...」,
+# 完全指不到「证书还没签」这个根因上。
+#
+# 实际证书不放进仓库:
+#   fullchain.pem / privkey.pem 命中 .gitignore 的 `*.pem` 规则。
+# 生成方法见 docs/10-test-deployment.md 第 4.1 节。

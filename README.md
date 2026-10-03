@@ -67,6 +67,7 @@
 | 07 | [前端设计](docs/07-frontend.md) | Vue + Ant Design Vue 架构 |
 | 08 | [容器化部署](docs/08-deployment.md) | Docker、配置项、排障 |
 | 09 | [安全设计](docs/09-security.md) | 威胁模型、上线检查清单 |
+| 10 | [测试环境部署](docs/10-test-deployment.md) | 测试编排、首个管理员、冒烟清单 |
 
 ## 里程碑
 

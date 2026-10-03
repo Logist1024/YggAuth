@@ -316,6 +316,9 @@ cd web && pnpm dev
 | 迁移失败 | 查看容器日志,`goose status` 确认当前版本 |
 | 数据库连不上 | 容器内 `DB_HOST` 须为服务名 `postgres`,不是 `localhost` |
 
+> **要搭测试环境**:本文讲的是生产形态(公网域名、Let's Encrypt、Secure cookie)。
+> 没有域名、想要可丢弃可重建的环境,走 [10-test-deployment.md](./10-test-deployment.md)。
+
 ---
 
 **上一篇**:[07-frontend.md](./07-frontend.md) —— 前端设计
