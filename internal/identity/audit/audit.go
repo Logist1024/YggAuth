@@ -51,18 +51,26 @@ type Repository interface {
 }
 
 // Entry 是一条审计记录。
+//
+// json tag 必须显式写出来:这个结构体是直接序列化给 /api/admin/audit 的。
+// 少了 tag,Go 会按字段名导出成 PascalCase(OccurredAt/Actor/…),
+// 而前端按 snake_case 读,结果是每一行都渲染成「Invalid Date + 空单元格」——
+// 不报错、不 404,只是安静地显示成一片空白,最难查的一类问题。
+//
+// Metadata 不导出:它是 []byte,序列化出来是一串无意义的 base64,
+// 前端也没有任何地方消费它。
 type Entry struct {
-	ID         int64
-	OccurredAt time.Time
-	AccountID  *uuid.UUID
-	Actor      string
-	Action     string
-	TargetType string
-	TargetID   string
-	Outcome    string
-	IP         string
-	UserAgent  string
-	Metadata   []byte
+	ID         int64      `json:"id"`
+	OccurredAt time.Time  `json:"occurred_at"`
+	AccountID  *uuid.UUID `json:"account_id,omitempty"`
+	Actor      string     `json:"actor"`
+	Action     string     `json:"action"`
+	TargetType string     `json:"target_type"`
+	TargetID   string     `json:"target_id"`
+	Outcome    string     `json:"outcome"`
+	IP         string     `json:"ip"`
+	UserAgent  string     `json:"user_agent"`
+	Metadata   []byte     `json:"-"`
 }
 
 // Service 是审计业务逻辑。

@@ -24,8 +24,10 @@ onMounted(load)
 async function load(): Promise<void> {
   loading.value = true
   try {
-    const data = await store.api.get<{ items: SessionItem[] }>('/api/account/sessions')
-    items.value = data.items
+    // 键名是 sessions,不是 items —— 读错键不会报错,
+    // 只会安静地渲染成一张空表,看起来像「没有登录设备」。
+    const data = await store.api.get<{ sessions: SessionItem[] }>('/api/account/sessions')
+    items.value = data.sessions ?? []
   } catch (err) {
     banner.value = err instanceof ApiError ? err.message : '查询失败'
   } finally {
@@ -58,6 +60,9 @@ async function logoutAll(): Promise<void> {
 <template>
   <div class="page">
     <h2>登录设备</h2>
+    <p class="muted" style="margin-bottom: 16px">
+      这里列出所有保持登录状态的设备。发现不认识的设备时,让它退出并顺手改一次密码。
+    </p>
     <a-alert v-if="banner" type="error" :message="banner" show-icon style="margin-bottom: 16px" />
 
     <a-spin :spinning="loading">
@@ -79,6 +84,16 @@ async function logoutAll(): Promise<void> {
               </a-popconfirm>
             </template>
           </a-list-item>
+        </template>
+        <template #emptyText>
+          <a-empty>
+            <template #description>
+              <div>没有查询到登录设备</div>
+              <div class="muted" style="margin-top: 4px">
+                正常情况下至少应包含当前这一台,刷新试试。
+              </div>
+            </template>
+          </a-empty>
         </template>
       </a-list>
     </a-spin>

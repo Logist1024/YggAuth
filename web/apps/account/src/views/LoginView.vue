@@ -2,7 +2,7 @@
 import { computed, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError, validateEmail } from '@yggauth/shared'
+import { errorBanner, validateEmail, type ErrorBanner } from '@yggauth/shared'
 
 import { useSessionStore } from '../stores/session'
 
@@ -13,14 +13,28 @@ const router = useRouter()
 const form = reactive({ email: '', password: '' })
 const errors = reactive({ email: '', password: '' })
 const submitting = ref(false)
-const banner = ref('')
+const banner = ref<ErrorBanner | null>(null)
 
 const canRegister = computed(() => store.policy.registration_mode !== 'closed')
+
+/**
+ * 详情行:先给可操作的建议,再给错误码。
+ *
+ * 没有内容时返回 undefined,让 a-alert 干脆不渲染详情区 ——
+ * 传空串会留下一个空白的描述块,看起来像样式坏了。
+ */
+const bannerDetail = computed(() => {
+  if (!banner.value) {
+    return undefined
+  }
+  const lines = [banner.value.hint, banner.value.trace].filter(Boolean)
+  return lines.length > 0 ? lines.join('\n') : undefined
+})
 
 async function onSubmit(): Promise<void> {
   errors.email = validateEmail(form.email).message
   errors.password = form.password ? '' : '请输入密码'
-  banner.value = ''
+  banner.value = null
   if (errors.email || errors.password) {
     return
   }
@@ -37,7 +51,7 @@ async function onSubmit(): Promise<void> {
     const target = typeof route.query.redirect === 'string' ? route.query.redirect : '/'
     await router.push(isInternalPath(target) ? target : '/')
   } catch (err) {
-    banner.value = err instanceof ApiError ? err.message : '登录失败,请稍后再试'
+    banner.value = errorBanner(err, '登录失败,请稍后再试')
   } finally {
     submitting.value = false
   }
@@ -50,7 +64,15 @@ function isInternalPath(path: string): boolean {
 
 <template>
   <a-form layout="vertical" @submit.prevent="onSubmit">
-    <a-alert v-if="banner" type="error" :message="banner" show-icon style="margin-bottom: 16px" />
+    <a-alert
+      v-if="banner"
+      class="error-alert"
+      type="error"
+      show-icon
+      style="margin-bottom: 16px"
+      :message="banner.title"
+      :description="bannerDetail"
+    />
 
     <a-form-item label="邮箱" :validate-status="errors.email ? 'error' : ''" :help="errors.email">
       <a-input v-model:value="form.email" type="email" autocomplete="username" placeholder="you@example.com" />

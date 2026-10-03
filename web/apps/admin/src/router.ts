@@ -96,7 +96,10 @@ const routes: RouteRecordRaw[] = [
 ]
 
 export const router = createRouter({
-  history: createWebHistory(),
+  // 必须与 Vite 的 base、以及 Go 侧的挂载前缀三者一致。
+  // 少了这一项,浏览器地址栏是 /admin/dashboard 而路由按 /dashboard 匹配,
+  // 结果是每条路由都落到 not-found。
+  history: createWebHistory('/admin'),
   routes,
 })
 

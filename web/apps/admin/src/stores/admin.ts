@@ -28,6 +28,8 @@ export interface MenuItem {
   icon?: string
   /** 需要的权限点;留空表示所有登录管理员可见。 */
   permission?: string
+  /** 侧边栏分组标题。留空表示不分组,由界面置顶。 */
+  group?: string
   children?: MenuItem[]
 }
 

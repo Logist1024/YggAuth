@@ -3,6 +3,7 @@ import { onMounted, reactive, ref } from 'vue'
 
 import { ApiError } from '@yggauth/shared'
 
+import EmptyState from '../components/EmptyState.vue'
 import { useAdminStore } from '../stores/admin'
 
 interface AccountRow {
@@ -11,8 +12,17 @@ interface AccountRow {
   email: string
   status: string
   email_verified: boolean
-  mc_login_enabled: boolean
+  /** 后端字段名就是 login_enabled(见 internal/admin/handler.go 的账号列表)。 */
+  login_enabled: boolean
   created_at: string
+}
+
+/** 账号状态的显示名。后端存的是枚举值,不该直接甩给用户看。 */
+const STATUS_LABEL: Record<string, string> = {
+  active: '正常',
+  disabled: '已停用',
+  pending_verification: '待验证邮箱',
+  locked: '已锁定',
 }
 
 const store = useAdminStore()
@@ -79,6 +89,10 @@ async function update(id: string, patch: Record<string, unknown>): Promise<void>
 
 <template>
   <div class="page">
+    <p class="muted" style="margin-bottom: 16px">
+      这里列出全部注册账号。可以按用户名或邮箱搜索,停用后该账号将无法登录。
+    </p>
+
     <a-alert v-if="banner" type="error" :message="banner" show-icon style="margin-bottom: 16px" />
 
     <a-card>
@@ -93,12 +107,34 @@ async function update(id: string, patch: Record<string, unknown>): Promise<void>
       </a-space>
 
       <a-spin :spinning="loading">
+        <!--
+          data-index 不能省。
+          a-table-column 只写 key 而不写 data-index、又不给默认插槽时,
+          Ant Design Vue 会渲染出一个空单元格 —— 不报错、不警告,
+          表格看上去就像「数据没查出来」。
+        -->
         <a-table :data-source="items" :pagination="false" row-key="id">
-          <a-table-column key="username" title="用户名" />
-          <a-table-column key="email" title="邮箱" />
+          <template #emptyText>
+            <EmptyState
+              :description="query.search ? '没有匹配的账号' : '还没有任何账号'"
+              :hint="
+                query.search
+                  ? '换个用户名或邮箱关键词试试。'
+                  : '用户注册后会自动出现在这里;也可以生成邀请码定向邀请。'
+              "
+            >
+              <RouterLink v-if="!query.search" to="/invitations">
+                <a-button type="primary">去生成邀请码</a-button>
+              </RouterLink>
+            </EmptyState>
+          </template>
+          <a-table-column key="username" data-index="username" title="用户名" />
+          <a-table-column key="email" data-index="email" title="邮箱" />
           <a-table-column key="status" title="状态">
             <template #default="{ record }">
-              <a-tag :color="record.status === 'active' ? 'green' : 'orange'">{{ record.status }}</a-tag>
+              <a-tag :color="record.status === 'active' ? 'green' : 'orange'">
+                {{ STATUS_LABEL[record.status] ?? record.status }}
+              </a-tag>
             </template>
           </a-table-column>
           <a-table-column key="email_verified" title="邮箱验证">
@@ -108,12 +144,17 @@ async function update(id: string, patch: Record<string, unknown>): Promise<void>
               </a-tag>
             </template>
           </a-table-column>
+          <!--
+            MC 登录是只读的:后端只有「账号本人凭 MC 令牌切换自己的开关」
+            (/mc/account/login-enabled),管理端的 PATCH /api/admin/accounts/:id
+            只接受 status 与 email。做成开关会变成一个点了没反应、
+            也不报错的控件 —— 比只读展示更糟。
+          -->
           <a-table-column key="mc" title="MC 登录">
             <template #default="{ record }">
-              <a-switch
-                :checked="record.mc_login_enabled"
-                @change="(v: boolean) => update(record.id, { mc_login_enabled: v })"
-              />
+              <a-tag :color="record.login_enabled ? 'green' : 'default'">
+                {{ record.login_enabled ? '已开启' : '已关闭' }}
+              </a-tag>
             </template>
           </a-table-column>
           <a-table-column key="actions" title="操作">

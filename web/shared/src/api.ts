@@ -6,23 +6,72 @@
  * 逻辑一旦分散到两个应用里,行为迟早会不一致 ——
  * 然后表现为「管理后台能自动续期,账号中心不能」。
  */
-import { ErrCodeSessionExpired, isEnvelope } from './index'
+import { ErrCode, ErrCodeSessionExpired, codeHint, codeTitle } from './codes'
+import { isEnvelope } from './index'
 
+/**
+ * 后端返回的业务错误。
+ *
+ * 除了原始的 code / status,还预先算好了三样展示用的东西 ——
+ * 调用方不该自己去查错误码表,那样每多一个展示位就多一份可能漂移的映射。
+ */
 export class ApiError extends Error {
   readonly code: number
   readonly status: number
+  /** 面向用户的一句话说明。后端信封的 message 优先,缺失时按错误码兜底。 */
+  readonly title: string
+  /** 用户可以采取的行动。没有可操作建议时为空串。 */
+  readonly hint: string
 
   constructor(message: string, code: number, status: number) {
-    super(message)
+    const title = message.trim() || codeTitle(code) || '请求失败'
+    // message 是各展示位直接引用的文本,这里把错误码一并带上:
+    // 用户报障时能直接念出来,不用再翻浏览器控制台。
+    super(`${title}（错误码 ${code}）`)
     this.name = 'ApiError'
     this.code = code
     this.status = status
+    this.title = title
+    this.hint = codeHint(code)
   }
 
   /** 会话失效,应当引导用户重新登录。 */
   get requiresLogin(): boolean {
     return this.status === 401 || this.code === ErrCodeSessionExpired
   }
+
+  /** 供支持人员定位的一行信息:错误码 + HTTP 状态。 */
+  get trace(): string {
+    return `错误码 ${this.code} · HTTP ${this.status}`
+  }
+}
+
+/** 可以直接渲染的错误提示。 */
+export interface ErrorBanner {
+  /** 一句话说明发生了什么。 */
+  title: string
+  /** 可操作的建议。为空表示这条错误没什么可建议的,不占位。 */
+  hint: string
+  /** 错误码与 HTTP 状态。网络层失败时为空串。 */
+  trace: string
+}
+
+/**
+ * 把任意异常转成可直接渲染的错误提示。
+ *
+ * 覆盖三类:后端业务错误(ApiError)、网络层失败(fetch 抛 TypeError)、
+ * 以及代码里的意外异常 —— 最后这一类用调用方给的兜底文案。
+ */
+export function errorBanner(err: unknown, fallback: string): ErrorBanner {
+  if (err instanceof ApiError) {
+    return { title: err.title, hint: err.hint, trace: err.trace }
+  }
+  // fetch 在断网、DNS 失败、被 CORS 拦下时抛 TypeError。
+  // 这类失败没有错误码可给,硬凑一个只会误导排查方向。
+  if (err instanceof TypeError) {
+    return { title: '无法连接服务器', hint: '请检查网络连接后重试。', trace: '' }
+  }
+  return { title: fallback, hint: '', trace: '' }
 }
 
 export interface ApiOptions {
@@ -90,15 +139,12 @@ export class ApiClient {
       } catch {
         // 非 JSON 响应(反向代理的错误页之类)。
         // 直接按状态码构造错误,而不是把 HTML 塞给用户看。
-        if (!resp.ok) {
-          throw new ApiError(`请求失败(HTTP ${resp.status})`, resp.status, resp.status)
-        }
-        throw new ApiError('响应不是合法的 JSON', ErrCode_INTERNAL_FALLBACK, resp.status)
+        throw new ApiError('服务器返回了非预期的响应', ErrCode.INTERNAL, resp.status)
       }
     }
 
     if (isEnvelope(parsed)) {
-      if (parsed.code !== ErrCode_OK) {
+      if (parsed.code !== ErrCode.OK) {
         const err = new ApiError(parsed.message, parsed.code, resp.status)
         if (err.requiresLogin && !opts.retried) {
           const recovered = await this.recoverSession()
@@ -112,7 +158,7 @@ export class ApiClient {
     }
 
     if (!resp.ok) {
-      throw new ApiError(`请求失败(HTTP ${resp.status})`, resp.status, resp.status)
+      throw new ApiError('服务器返回了非预期的响应', ErrCode.INTERNAL, resp.status)
     }
     return parsed as T
   }
@@ -150,10 +196,8 @@ export class ApiClient {
   }
 }
 
-// 与后端对齐的两个常量。放在这里而不是从 index.ts 导入是为了
-// 避免 api.ts 与 index.ts 互相依赖形成环。
-const ErrCode_INTERNAL_FALLBACK = 10003
-const ErrCode_OK = 10000
+// 错误码常量统一在 ./codes.ts —— 这里曾经为了绕开循环依赖抄过一份,
+// 结果与后端漂移,把成功响应当成了失败。别再抄第二份。
 
 /** 构造一个默认客户端,应用启动时用配置补齐。 */
 export function createClient(options: ApiOptions = {}): ApiClient {

@@ -7,6 +7,13 @@ import vue from '@vitejs/plugin-vue'
 // 用相对路径而不是绝对路径:绝对路径在开发机与 CI 上不同,
 // 产物的 sourcemap 会把构建者的目录结构写进去。
 export default defineConfig({
+  // 后台挂在 /admin 前缀下(见 internal/webserver/webserver.go)。
+  //
+  // 不设 base 时 Vite 默认用 "/",产物里的资源引用会是 /assets/...,
+  // 而那个路径由挂在根上的账号站 SPA 接管 —— 它会把未知路径回退成
+  // 一份 index.html。浏览器看到 text/html 配 nosniff 直接拒绝执行,
+  // 后台首页就是一片白,且控制台只有一行 MIME 类型错误。
+  base: '/admin/',
   plugins: [vue()],
   resolve: {
     alias: {

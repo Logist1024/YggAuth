@@ -19,20 +19,12 @@ export interface Envelope<T> {
   data: T
 }
 
-/** 业务错误码,与 Go 侧 internal/platform/apperr 保持一致。 */
-export const ErrCode = {
-  OK: 10000,
-  INVALID_ARGUMENT: 10001,
-  UNAUTHORIZED: 10002,
-  INTERNAL: 10003,
-  FORBIDDEN: 10004,
-  CONFLICT: 10005,
-  NOT_FOUND: 10006,
-  RATE_LIMITED: 10007,
-} as const
-
-/** 服务端会话过期后返回的码。 */
-export const ErrCodeSessionExpired = 20008
+// 错误码表在 ./codes.ts,末尾统一再导出。
+//
+// 单独成模块而不是写在这里,是为了让 api.ts 能直接引用 ——
+// 本文件末尾有 `export * from './api'`,从 api.ts 反向 import 本文件
+// 会形成环,而当初为了躲这个环就在 api.ts 里抄了一份常量,
+// 两份定义漂移后导致了「成功响应被当成错误」。详见 codes.ts。
 
 export function isEnvelope(value: unknown): value is Envelope<unknown> {
   return (
@@ -92,6 +84,7 @@ export const DEFAULT_CLIENT_ID: ClientId = 'app'
 export function parseClientId(raw: string | null | undefined): ClientId {
   return raw === 'mc' || raw === 'app' ? raw : DEFAULT_CLIENT_ID
 }
+export * from './codes'
 export * from './validation'
 export * from './permissions'
 export * from './api'

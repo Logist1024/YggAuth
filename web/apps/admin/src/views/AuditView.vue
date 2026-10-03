@@ -3,18 +3,42 @@ import { onMounted, reactive, ref } from 'vue'
 
 import { ApiError } from '@yggauth/shared'
 
+import EmptyState from '../components/EmptyState.vue'
 import { useAdminStore } from '../stores/admin'
 
+/** 字段名对齐 internal/identity/audit.Entry 的 json tag。 */
 interface AuditEvent {
-  id: string
-  actor_type: string
-  actor_id: string
+  id: number
+  occurred_at: string
+  actor: string
+  /** 后端解析出来的用户名。解析不到(如 system)时为空。 */
+  actor_name?: string
   action: string
   target_type: string
   target_id: string
+  /** 目标为账号时后端解析出来的用户名。 */
+  target_name?: string
   outcome: string
   ip: string
-  created_at: string
+  user_agent: string
+}
+
+/** 结果的显示名。后端存的是枚举值。 */
+const OUTCOME_LABEL: Record<string, string> = {
+  success: '成功',
+  failure: '失败',
+}
+
+/**
+ * 格式化时间,并对脏数据兜底。
+ *
+ * 直接 new Date(x).toLocaleString() 在字段名对不上时会渲染成
+ * 一屏「Invalid Date」—— 看起来像时间坏了,实际是契约漂移。
+ * 显示一个破折号比显示 12 行 Invalid Date 更容易看出问题所在。
+ */
+function formatTime(value: string): string {
+  const t = new Date(value)
+  return Number.isNaN(t.getTime()) ? '—' : t.toLocaleString()
 }
 
 const store = useAdminStore()
@@ -76,6 +100,10 @@ function exportCSV(): void {
 
 <template>
   <div class="page">
+    <p class="muted" style="margin-bottom: 16px">
+      这里记录登录、改密、权限变更等操作。可按动作与结果筛选,或导出 CSV 存档。
+    </p>
+
     <a-alert v-if="banner" type="error" :message="banner" show-icon style="margin-bottom: 16px" />
 
     <a-card>
@@ -92,22 +120,47 @@ function exportCSV(): void {
 
       <a-spin :spinning="loading">
         <a-table :data-source="items" row-key="id" :pagination="false">
-          <a-table-column key="created_at" title="时间">
-            <template #default="{ record }">{{ new Date(record.created_at).toLocaleString() }}</template>
+          <template #emptyText>
+            <EmptyState
+              :description="
+                query.action || query.outcome ? '没有符合筛选条件的记录' : '还没有任何操作记录'
+              "
+              :hint="
+                query.action || query.outcome
+                  ? '放宽或清空筛选条件试试。'
+                  : '登录、改密、权限变更等操作产生后会自动出现在这里。'
+              "
+            />
+          </template>
+          <a-table-column key="occurred_at" title="时间" :width="180">
+            <template #default="{ record }">{{ formatTime(record.occurred_at) }}</template>
           </a-table-column>
-          <a-table-column key="actor" title="主体">
-            <template #default="{ record }">{{ record.actor_type }}:{{ record.actor_id || '-' }}</template>
-          </a-table-column>
-          <a-table-column key="action" title="动作" />
-          <a-table-column key="target" title="目标">
-            <template #default="{ record }">{{ record.target_type }}:{{ record.target_id }}</template>
-          </a-table-column>
-          <a-table-column key="outcome" title="结果">
+          <a-table-column key="actor" title="主体" :width="180">
             <template #default="{ record }">
-              <a-tag :color="record.outcome === 'success' ? 'green' : 'red'">{{ record.outcome }}</a-tag>
+              <!-- 显示用户名,原始串留在 tooltip 里 —— 排查时仍需确认到底是哪个主体。 -->
+              <a-tooltip v-if="record.actor_name" :title="record.actor">
+                <span>{{ record.actor_name }}</span>
+              </a-tooltip>
+              <span v-else class="muted">{{ record.actor || '—' }}</span>
             </template>
           </a-table-column>
-          <a-table-column key="ip" title="IP" />
+          <a-table-column key="action" data-index="action" title="动作" />
+          <a-table-column key="target" title="目标" :width="180">
+            <template #default="{ record }">
+              <a-tooltip v-if="record.target_name" :title="`${record.target_type}:${record.target_id}`">
+                <span>{{ record.target_name }}</span>
+              </a-tooltip>
+              <span v-else>{{ record.target_type ? `${record.target_type}:${record.target_id}` : '—' }}</span>
+            </template>
+          </a-table-column>
+          <a-table-column key="outcome" title="结果" :width="100">
+            <template #default="{ record }">
+              <a-tag :color="record.outcome === 'success' ? 'green' : 'red'">
+                {{ OUTCOME_LABEL[record.outcome] ?? record.outcome }}
+              </a-tag>
+            </template>
+          </a-table-column>
+          <a-table-column key="ip" data-index="ip" title="IP" :width="150" />
         </a-table>
       </a-spin>
 

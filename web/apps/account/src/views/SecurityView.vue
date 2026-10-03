@@ -80,6 +80,9 @@ async function changePassword(): Promise<void> {
 <template>
   <div class="page">
     <h2>安全设置</h2>
+    <p class="muted" style="margin-bottom: 16px">
+      在这里修改用户名、邮箱与密码。需要让某台设备退出登录时,去「登录设备」处理。
+    </p>
 
     <a-card title="账号资料" style="margin-bottom: 16px">
       <a-alert v-if="profileErr" type="error" :message="profileErr" show-icon style="margin-bottom: 16px" />

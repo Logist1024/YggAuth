@@ -180,7 +180,14 @@ func isBackendPrefix(path, spaPrefix string) bool {
 	// 它的 /admin/clients 是自己的页面而不是后端接口。
 	rel := strings.TrimPrefix(path, spaPrefix)
 	if rel == "" {
-		rel = path
+		// path 恰好等于本 SPA 的挂载前缀(如 /admin)—— 那是它自己的根,
+		// 不是后端路径。
+		//
+		// 这里**不能**回退成完整 path:那样 /admin 会撞上 backendPrefixes
+		// 里的 "/admin",于是后台首页被判成后端路径、返回 JSON 404。
+		// 挂载在根上的 SPA(spaPrefix 为空)不会走到这里 ——
+		// TrimPrefix 对空前缀是空操作,rel 不可能为空。
+		return false
 	}
 
 	for _, prefix := range backendPrefixes {

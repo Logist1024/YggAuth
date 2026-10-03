@@ -6,6 +6,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -147,12 +148,17 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 }
 
 // menuItem 是后台菜单项。
+//
+// Group 只用于界面分组。九项平铺时,「OIDC 客户端」「材质库」这类
+// 专有名词夹在「账号管理」中间,新管理员看不出哪些跟自己有关 ——
+// 分组标题比给每一项加解释更省地方。
 type menuItem struct {
 	Key        string     `json:"key"`
 	Path       string     `json:"path"`
 	Title      string     `json:"title"`
 	Icon       string     `json:"icon"`
 	Permission string     `json:"permission"`
+	Group      string     `json:"group,omitempty"`
 	Children   []menuItem `json:"children,omitempty"`
 }
 
@@ -160,16 +166,24 @@ type menuItem struct {
 //
 // 后端下发菜单而不是前端硬编码,是为了让「加一个后台模块」
 // 不必改前端 —— 菜单的可见性由权限点决定。
+//
+// 顺序即界面顺序。仪表盘不分组(空 Group)由前端置顶,
+// 其余按 Group 聚成若干块。
 var allMenus = []menuItem{
 	{Key: "dashboard", Path: "/dashboard", Title: "仪表盘", Icon: "dashboard"},
-	{Key: "accounts", Path: "/accounts", Title: "账号管理", Icon: "user", Permission: PermAccountRead},
-	{Key: "roles", Path: "/roles", Title: "角色权限", Icon: "safety", Permission: PermRBACRead},
-	{Key: "invitations", Path: "/invitations", Title: "邀请管理", Icon: "mail", Permission: PermRBACWrite},
-	{Key: "audit", Path: "/audit", Title: "审计日志", Icon: "file-search", Permission: PermAuditRead},
-	{Key: "clients", Path: "/clients", Title: "OIDC 客户端", Icon: "api", Permission: PermOIDCClientRead},
-	{Key: "mc_profiles", Path: "/mc/profiles", Title: "玩家档案", Icon: "idcard", Permission: "minecraft:profile:read"},
-	{Key: "mc_textures", Path: "/mc/textures", Title: "材质库", Icon: "picture", Permission: "minecraft:texture:read"},
-	{Key: "settings", Path: "/settings", Title: "应用配置", Icon: "setting", Permission: PermSettingRead},
+
+	{Key: "accounts", Path: "/accounts", Title: "账号管理", Icon: "user", Group: "账号与权限", Permission: PermAccountRead},
+	{Key: "roles", Path: "/roles", Title: "角色权限", Icon: "safety", Group: "账号与权限", Permission: PermRBACRead},
+	{Key: "invitations", Path: "/invitations", Title: "邀请管理", Icon: "mail", Group: "账号与权限", Permission: PermRBACWrite},
+
+	{Key: "audit", Path: "/audit", Title: "审计日志", Icon: "file-search", Group: "安全与审计", Permission: PermAuditRead},
+
+	{Key: "clients", Path: "/clients", Title: "OIDC 客户端", Icon: "api", Group: "应用接入", Permission: PermOIDCClientRead},
+
+	{Key: "mc_profiles", Path: "/mc/profiles", Title: "玩家档案", Icon: "idcard", Group: "Minecraft", Permission: "minecraft:profile:read"},
+	{Key: "mc_textures", Path: "/mc/textures", Title: "材质库", Icon: "picture", Group: "Minecraft", Permission: "minecraft:texture:read"},
+
+	{Key: "settings", Path: "/settings", Title: "应用配置", Icon: "setting", Group: "系统", Permission: PermSettingRead},
 }
 
 // Menus 返回按权限点过滤后的菜单。
@@ -186,10 +200,14 @@ func (h *Handler) Menus(w http.ResponseWriter, r *http.Request) {
 }
 
 // Dashboard 返回概览统计。
+//
+// 每个数字都会直接显示在首页卡片上,所以它必须真的是一次统计。
+// 之前的 accounts_recent 取的是 List(Limit: 1) 的返回条数 ——
+// 那其实是「有没有账号」,恒为 0 或 1,和「最近注册」没有任何关系。
 func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	accounts, total, err := h.deps.Identity.Accounts.List(ctx, account.ListFilter{Limit: 1})
+	_, total, err := h.deps.Identity.Accounts.List(ctx, account.ListFilter{Limit: 1})
 	if err != nil {
 		httpx.Fail(w, err)
 		return
@@ -207,20 +225,28 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 统计事件数用一次轻量查询,不做全表扫描
-	var auditCount int64
+	// 计数走轻量查询,不做全表扫描。
+	// 失败就保持 0:首页少一个数字,比整页报错好。
+	var recentAccounts, auditCount, oidcClients, mcServers int64
 	if h.deps.DB != nil {
+		_ = h.deps.DB.QueryRow(ctx,
+			`SELECT count(*) FROM identity.account WHERE created_at > now() - interval '7 days'`,
+		).Scan(&recentAccounts)
 		_ = h.deps.DB.QueryRow(ctx,
 			`SELECT count(*) FROM identity.audit_event WHERE occurred_at > now() - interval '24 hours'`,
 		).Scan(&auditCount)
+		_ = h.deps.DB.QueryRow(ctx, `SELECT count(*) FROM oidc.client`).Scan(&oidcClients)
+		_ = h.deps.DB.QueryRow(ctx, `SELECT count(*) FROM minecraft.server`).Scan(&mcServers)
 	}
 
 	httpx.OK(w, map[string]any{
-		"accounts_total":    total,
-		"accounts_recent":   len(accounts),
-		"roles_total":       len(roles),
-		"permissions_total": len(perms),
-		"audit_events_24h":  auditCount,
+		"accounts_total":     total,
+		"accounts_recent":    recentAccounts,
+		"roles_total":        len(roles),
+		"permissions_total":  len(perms),
+		"audit_events_24h":   auditCount,
+		"oidc_clients_total": oidcClients,
+		"mc_servers_total":   mcServers,
 	})
 }
 
@@ -517,6 +543,20 @@ func (h *Handler) ListPermissions(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------- 审计
 
 // SearchAudit 检索审计事件。
+// auditEventDTO 是审计事件的对外形态。
+//
+// 在 Entry 之外补两个解析出来的名字:Actor 存的是 "account:<uuid>"
+// 这类复合串,原样甩到界面上就是两行 UUID —— 占地方、换行难看,
+// 而看日志的人真正想知道的是「谁干的」。
+type auditEventDTO struct {
+	audit.Entry
+	// ActorName 是主体对应的用户名。解析不出来时(如 system)为空,
+	// 界面回落到显示原始的 Actor 串。
+	ActorName string `json:"actor_name,omitempty"`
+	// TargetName 是目标为账号时的用户名。
+	TargetName string `json:"target_name,omitempty"`
+}
+
 func (h *Handler) SearchAudit(w http.ResponseWriter, r *http.Request) {
 	filter, err := auditFilter(r)
 	if err != nil {
@@ -529,7 +569,92 @@ func (h *Handler) SearchAudit(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, err)
 		return
 	}
-	httpx.OK(w, map[string]any{"events": entries, "total": total})
+
+	names := h.resolveAuditNames(r.Context(), entries)
+
+	events := make([]auditEventDTO, 0, len(entries))
+	for _, e := range entries {
+		dto := auditEventDTO{Entry: e}
+		if id, ok := auditActorID(e.Actor); ok {
+			dto.ActorName = names[id]
+		}
+		if e.TargetType == "account" {
+			if id, err := uuid.Parse(e.TargetID); err == nil {
+				dto.TargetName = names[id]
+			}
+		}
+		events = append(events, dto)
+	}
+
+	httpx.OK(w, map[string]any{"events": events, "total": total})
+}
+
+// auditActorID 从 "account:<uuid>" / "admin:<uuid>" 里取出账号 ID。
+// "system" 或格式不符时返回 false —— 这类主体本来就没有用户名可显示。
+func auditActorID(actor string) (uuid.UUID, bool) {
+	_, rest, ok := strings.Cut(actor, ":")
+	if !ok {
+		return uuid.Nil, false
+	}
+	id, err := uuid.Parse(rest)
+	if err != nil {
+		return uuid.Nil, false
+	}
+	return id, true
+}
+
+// resolveAuditNames 批量取一页事件涉及到的用户名。
+//
+// 一次查询解决一屏(默认 50 条),而不是每条事件查一次 ——
+// 后者会把一个列表页变成 50 次数据库往返。
+//
+// 查询失败时返回空表而不是报错:界面回落到显示原始 Actor 串,
+// 审计内容本身仍然是完整可用的,不该因为「名字查不到」就整页失败。
+func (h *Handler) resolveAuditNames(ctx context.Context, entries []audit.Entry) map[uuid.UUID]string {
+	names := map[uuid.UUID]string{}
+	if h.deps.DB == nil {
+		return names
+	}
+
+	seen := make(map[uuid.UUID]struct{}, len(entries)*2)
+	ids := make([]uuid.UUID, 0, len(entries)*2)
+	add := func(id uuid.UUID) {
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+
+	for _, e := range entries {
+		if id, ok := auditActorID(e.Actor); ok {
+			add(id)
+		}
+		if e.TargetType == "account" {
+			if id, err := uuid.Parse(e.TargetID); err == nil {
+				add(id)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return names
+	}
+
+	rows, err := h.deps.DB.Query(ctx,
+		`SELECT id, username FROM identity.account WHERE id = ANY($1::uuid[])`, ids)
+	if err != nil {
+		return names
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id uuid.UUID
+		var name string
+		if rows.Scan(&id, &name) == nil {
+			names[id] = name
+		}
+	}
+	return names
 }
 
 // ExportAudit 导出审计事件为 CSV。

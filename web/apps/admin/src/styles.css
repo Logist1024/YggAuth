@@ -51,3 +51,14 @@ body {
   color: #6b7280;
   font-size: 13px;
 }
+
+/*
+ * 错误提示的详情行:可操作建议与错误码各占一行。
+ *
+ * errorBanner 用 \n 拼这两行,而 HTML 默认把换行折叠成空格 ——
+ * 不加 pre-line 的话错误码会挤在正文末尾,像是随手拼上去的,
+ * 用户根本注意不到,也就失去了「报障时报出错误码」的意义。
+ */
+.error-alert .ant-alert-description {
+  white-space: pre-line;
+}

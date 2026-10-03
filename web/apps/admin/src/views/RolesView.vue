@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 
 import { ApiError } from '@yggauth/shared'
 
+import EmptyState from '../components/EmptyState.vue'
 import { useAdminStore } from '../stores/admin'
 
 interface RoleRow {
@@ -10,7 +11,8 @@ interface RoleRow {
   code: string
   name: string
   description: string
-  members: number
+  /** 系统内置角色后端禁止删除(见 internal/identity/rbac/rbac.go 的 DeleteRole)。 */
+  is_system: boolean
   permissions: string[]
 }
 
@@ -76,6 +78,10 @@ async function remove(role: RoleRow): Promise<void> {
 
 <template>
   <div class="page">
+    <p class="muted" style="margin-bottom: 16px">
+      角色是权限点的集合。系统内置的两个角色不可删除,需要更细的权限划分时新建一个。
+    </p>
+
     <a-alert v-if="banner" type="error" :message="banner" show-icon style="margin-bottom: 16px" />
 
     <a-card title="角色">
@@ -83,19 +89,51 @@ async function remove(role: RoleRow): Promise<void> {
         <a-button type="primary" @click="creating = true">新建角色</a-button>
       </template>
       <a-spin :spinning="loading">
+        <!--
+          列宽必须显式给。权限点列是变长的(内置角色有 17 个),不给宽度时
+          表格会把其余列压到最小 —— 表现为列头被挤成竖排单字,整行读不了。
+          标识/名称这类短字段也要给宽度,否则同样会被抢空间。
+        -->
         <a-table :data-source="roles" row-key="id" :pagination="false">
-          <a-table-column key="code" title="标识" />
-          <a-table-column key="name" title="名称" />
-          <a-table-column key="description" title="描述" />
-          <a-table-column key="members" title="成员数" />
-          <a-table-column key="perms" title="权限点">
+          <template #emptyText>
+            <EmptyState
+              description="还没有任何角色"
+              hint="正常部署下这里至少会有「平台管理员」与「普通用户」两个系统角色。"
+            />
+          </template>
+          <a-table-column key="code" data-index="code" title="标识" :width="170" />
+          <a-table-column key="name" data-index="name" title="名称" :width="150" />
+          <a-table-column key="description" data-index="description" title="描述" />
+          <a-table-column key="perm_count" title="权限点" :width="300">
             <template #default="{ record }">
-              <a-tag v-for="p in record.permissions" :key="p" style="margin-right: 4px">{{ p }}</a-tag>
+              <span v-if="record.permissions.length === 0" class="muted">未授予</span>
+              <a-tooltip v-else>
+                <template #title>
+                  <div v-for="p in record.permissions" :key="p">{{ p }}</div>
+                </template>
+                <a-tag
+                  v-for="p in record.permissions.slice(0, 2)"
+                  :key="p"
+                  style="margin-right: 4px"
+                >
+                  {{ p }}
+                </a-tag>
+                <a-tag v-if="record.permissions.length > 2">
+                  +{{ record.permissions.length - 2 }}
+                </a-tag>
+              </a-tooltip>
             </template>
           </a-table-column>
-          <a-table-column key="actions" title="操作">
+          <a-table-column key="actions" title="操作" :width="110">
             <template #default="{ record }">
-              <a-popconfirm title="删除角色不会自动回收已授予的权限,确定?" @confirm="remove(record)">
+              <a-tooltip v-if="record.is_system" title="系统内置角色不可删除">
+                <a-button danger size="small" disabled>删除</a-button>
+              </a-tooltip>
+              <a-popconfirm
+                v-else
+                title="删除角色不会自动回收已授予的权限,确定?"
+                @confirm="remove(record)"
+              >
                 <a-button danger size="small">删除</a-button>
               </a-popconfirm>
             </template>
