@@ -57,7 +57,17 @@ func SessionAuth(auth SessionAuthenticator, cfg AuthConfig) func(http.Handler) h
 
 			res, err := auth.AuthenticateSession(r.Context(), token)
 			if err != nil {
-				httpx.Fail(w, apperr.From(err))
+				// 凭据**存在但无效**(例如服务重启后会话被清、
+				// 浏览器还留着旧 cookie)不能当作致命错误 —— 它
+				// 与「没带凭据」在语义上是一样的:主体未知。
+				//
+				// 把它当成未认证继续放行,理由与上面 `token == ""`
+				// 分支一致:公开接口(登录/注册)必须能跑,
+				// 受保护接口另有 RequireAuth 会基于 nil 主体返回 401。
+				//
+				// 这里不主动清 cookie —— 登录成功后的 Set-Cookie
+				// 会用同名同域覆盖旧值,无须多写一次响应头。
+				next.ServeHTTP(w, r)
 				return
 			}
 
