@@ -150,6 +150,10 @@ type Querier interface {
 	GetReusableNameConflict(ctx context.Context, name string) (MinecraftNameHistory, error)
 	GetRoleByCode(ctx context.Context, code string) (IdentityRole, error)
 	GetRoleByID(ctx context.Context, id uuid.UUID) (IdentityRole, error)
+	// 行级排他锁。首启引导用它把「并发创建管理员」串行化:
+	// 这行由基线迁移种下、且带 is_system,永远存在,是天然的锁对象,
+	// 不必引入魔数式的 advisory lock 键。
+	GetRoleForUpdate(ctx context.Context, code string) (IdentityRole, error)
 	GetServerSession(ctx context.Context, serverID string) (MinecraftServerSession, error)
 	GetSessionByID(ctx context.Context, id uuid.UUID) (IdentitySession, error)
 	// 全局登出:把同一 SSO 会话下的所有终端用户会话一起吊销。
@@ -160,7 +164,7 @@ type Querier interface {
 	GetTextureByHash(ctx context.Context, hash string) (MinecraftTexture, error)
 	GrantRole(ctx context.Context, arg GrantRoleParams) (IdentityAccountRole, error)
 	HasPermission(ctx context.Context, arg HasPermissionParams) (bool, error)
-	// 审计表只追加,应用层没有任何删除接口(见 docs/09-security.md 9.2)。
+	// 审计表只追加,应用层没有任何删除接口(见 docs/security.md 9.2)。
 	InsertAuditEvent(ctx context.Context, arg InsertAuditEventParams) (IdentityAuditEvent, error)
 	// ---------------------------------------------------------------- 改名历史
 	InsertNameHistory(ctx context.Context, arg InsertNameHistoryParams) (MinecraftNameHistory, error)
@@ -245,10 +249,17 @@ type Querier interface {
 	// 后台审计检索。可选参数为 NULL 时不参与过滤。
 	SearchAuditEvents(ctx context.Context, arg SearchAuditEventsParams) ([]IdentityAuditEvent, error)
 	SetAccountEmailVerified(ctx context.Context, id uuid.UUID) (IdentityAccount, error)
+	// 首登强制改密(P1)的真源开关:引导建号置 true,改密/重置密码置 false。
+	// 不并进 UpsertCredential 是因为「写入新的哈希」和「要求用户改密」是两件
+	// 独立的事:引导流程写完哈希还要再要求改密,合并会逼调用方打擦边球。
+	SetCredentialMustChange(ctx context.Context, arg SetCredentialMustChangeParams) error
 	// mc_login_enabled 是通用布尔开关,内核不理解其业务语义(见迁移注释)。
 	SetMCLoginEnabled(ctx context.Context, arg SetMCLoginEnabledParams) (IdentityAccount, error)
 	// 授权前先清空再写入,整体替换语义。
 	SetRolePermissions(ctx context.Context, roleID uuid.UUID) error
+	// 把凭据上的 must_change 真源投到本次会话上,认证中间件读这一列即可,
+	// 不必为判断强制改密在每个请求上多查一次凭据(见迁移 00008 的注释)。
+	SetSessionMustChangePassword(ctx context.Context, arg SetSessionMustChangePasswordParams) error
 	TouchCredentialChangedAt(ctx context.Context, arg TouchCredentialChangedAtParams) error
 	// 记录最近一次轮询,用于检测过于频繁的轮询。
 	TouchDeviceCodePoll(ctx context.Context, id uuid.UUID) error

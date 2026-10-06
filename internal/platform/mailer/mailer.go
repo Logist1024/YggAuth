@@ -4,7 +4,7 @@
 //   - console:把邮件内容写进日志,开发与无邮件服务的部署用它
 //   - smtp:标准 SMTP,支持 STARTTLS 与隐式 TLS
 //
-// 安全约束(docs/09-security.md 6.3):日志里**不打印邮件正文**。
+// 安全约束(docs/security.md 6.3):日志里**不打印邮件正文**。
 // 正文含重置令牌,写进日志等于把令牌泄露给任何能看到日志的人。
 // console 模式只打收件人与主题。
 package mailer
@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -45,6 +46,57 @@ type Config struct {
 // Sender 发送邮件。
 type Sender interface {
 	Send(ctx context.Context, msg account.Message) error
+}
+
+// Stage 是发信走到的阶段。
+//
+// 配了发件邮箱却不知道对不对,错要等到下一个注册用户身上才暴露 ——
+// 而「发送失败」这四个字什么也没说。把失败钉在具体一步上,
+// 管理员看到 `auth` 就知道是账号密码,看到 `tls` 就知道是端口配错了。
+type Stage string
+
+const (
+	// StageConnect 是 TCP 连接与 SMTP 应答
+	StageConnect Stage = "connect"
+	// StageTLS 是隐式 TLS 握手或 STARTTLS
+	StageTLS Stage = "tls"
+	// StageAuth 是账号认证
+	StageAuth Stage = "auth"
+	// StageSend 是 MAIL FROM → RCPT TO → DATA → 退出
+	StageSend Stage = "send"
+)
+
+// StageError 把一次失败钉在某个阶段上。
+type StageError struct {
+	Stage Stage
+	Err   error
+}
+
+// Error 实现 error。
+func (e *StageError) Error() string { return fmt.Sprintf("%s 阶段失败: %v", e.Stage, e.Err) }
+
+// Unwrap 保留原始错误,便于 errors.Is/As 判断根因。
+func (e *StageError) Unwrap() error { return e.Err }
+
+// stageOf 从错误里取出阶段;不是 StageError 时按 send 处理。
+// (调用方只要的是「卡在哪一步」,拿不到就当最后一步。)
+func stageOf(err error) Stage {
+	var se *StageError
+	if errors.As(err, &se) {
+		return se.Stage
+	}
+	return StageSend
+}
+
+// StageOf 对外暴露的阶段提取:管理员错误页与测试信结果都用它。
+func StageOf(err error) Stage { return stageOf(err) }
+
+// errStage 造一个带阶段的错误。
+func errStage(stage Stage, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &StageError{Stage: stage, Err: err}
 }
 
 // Console 把邮件记进日志,不真正发送。
@@ -96,7 +148,7 @@ func (realSMTP) send(ctx context.Context, cfg Config, from, to string, msg []byt
 	dialer := &net.Dialer{Timeout: cfg.Timeout}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return fmt.Errorf("连接 SMTP 服务器失败: %w", err)
+		return errStage(StageConnect, fmt.Errorf("连接 SMTP 服务器失败: %w", err))
 	}
 	_ = conn.SetDeadline(time.Now().Add(cfg.Timeout))
 
@@ -107,7 +159,7 @@ func (realSMTP) send(ctx context.Context, cfg Config, from, to string, msg []byt
 		})
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			_ = conn.Close()
-			return fmt.Errorf("SMTP TLS 握手失败: %w", err)
+			return errStage(StageTLS, fmt.Errorf("SMTP TLS 握手失败: %w", err))
 		}
 		conn = tlsConn
 	}
@@ -115,7 +167,8 @@ func (realSMTP) send(ctx context.Context, cfg Config, from, to string, msg []byt
 	c, err := smtp.NewClient(conn, cfg.SMTPHost)
 	if err != nil {
 		_ = conn.Close()
-		return fmt.Errorf("初始化 SMTP 客户端失败: %w", err)
+		// 读不到服务的问候语:连接建上了但对面不是个能用的 SMTP
+		return errStage(StageConnect, fmt.Errorf("初始化 SMTP 客户端失败: %w", err))
 	}
 	defer func() { _ = c.Close() }()
 
@@ -126,7 +179,7 @@ func (realSMTP) send(ctx context.Context, cfg Config, from, to string, msg []byt
 				ServerName: cfg.SMTPHost,
 				MinVersion: tls.VersionTLS12,
 			}); err != nil {
-				return fmt.Errorf("SMTP STARTTLS 失败: %w", err)
+				return errStage(StageTLS, fmt.Errorf("SMTP STARTTLS 失败: %w", err))
 			}
 		}
 	}
@@ -134,30 +187,30 @@ func (realSMTP) send(ctx context.Context, cfg Config, from, to string, msg []byt
 	if cfg.Username != "" {
 		if ok, _ := c.Extension("AUTH"); ok {
 			if err := c.Auth(smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.SMTPHost)); err != nil {
-				return fmt.Errorf("SMTP 认证失败: %w", err)
+				return errStage(StageAuth, fmt.Errorf("SMTP 认证失败: %w", err))
 			}
 		}
 	}
 
 	if err := c.Mail(from); err != nil {
-		return fmt.Errorf("SMTP MAIL FROM 失败: %w", err)
+		return errStage(StageSend, fmt.Errorf("SMTP MAIL FROM 失败: %w", err))
 	}
 	if err := c.Rcpt(to); err != nil {
-		return fmt.Errorf("SMTP RCPT TO 失败: %w", err)
+		return errStage(StageSend, fmt.Errorf("SMTP RCPT TO 失败: %w", err))
 	}
 
 	w, err := c.Data()
 	if err != nil {
-		return fmt.Errorf("SMTP DATA 失败: %w", err)
+		return errStage(StageSend, fmt.Errorf("SMTP DATA 失败: %w", err))
 	}
 	if _, err := w.Write(msg); err != nil {
 		_ = w.Close()
-		return fmt.Errorf("写入邮件正文失败: %w", err)
+		return errStage(StageSend, fmt.Errorf("写入邮件正文失败: %w", err))
 	}
 	if err := w.Close(); err != nil {
-		return fmt.Errorf("结束邮件正文失败: %w", err)
+		return errStage(StageSend, fmt.Errorf("结束邮件正文失败: %w", err))
 	}
-	return c.Quit()
+	return errStage(StageSend, c.Quit())
 }
 
 func (realSMTP) close() error { return nil }

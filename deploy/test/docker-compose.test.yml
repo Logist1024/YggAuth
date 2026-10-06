@@ -85,12 +85,12 @@ services:
       # 应用读的键名是 SMTP_USER(internal/config/config.go Load()),
       # 而根编排透传的是 SMTP_USERNAME —— 两者对不上,
       # 导致 MAILER_TRANSPORT=smtp 时应用永远读到空用户名并拒绝启动。
-      # 详见 docs/10-test-deployment.md 第九节。
+      # 详见 docs/deployment.md 第九节。
       SMTP_TLS: "${SMTP_TLS:-true}"
       SMTP_USER: "${SMTP_USER:-}"
 
   nginx:
-    # profile 门控:默认不启动。启用方式见 docs/10-test-deployment.md 路线 C。
+    # profile 门控:默认不启动。启用方式见 docs/deployment.md 路线 C。
     profiles: ["tls"]
 
     volumes:

@@ -16,7 +16,7 @@ import (
 // SettingStore 读写运行时可改的应用配置。
 //
 // app.setting 的优先级**高于**环境变量:后台调整后无需重启即可生效
-// (docs/08-deployment.md 5.3)。环境变量负责提供首次启动的默认值,
+// (docs/deployment.md 5.3)。环境变量负责提供首次启动的默认值,
 // 迁移已经把同样的默认值写进了表里。
 type SettingStore struct {
 	q *query.Queries
@@ -29,9 +29,12 @@ func NewSettingStore(pool *db.Pool) *SettingStore {
 
 // Setting 是一条应用配置。
 type Setting struct {
-	Key       string          `json:"key"`
-	Value     json.RawMessage `json:"value"`
-	UpdatedAt string          `json:"updated_at"`
+	Key   string          `json:"key"`
+	Value json.RawMessage `json:"value"`
+	// UpdatedBy 为 nil 表示这一行还没被后台改过 ——
+	// 启动回填靠它区分「迁移种的默认值」与「运维改过的现值」。
+	UpdatedBy *uuid.UUID `json:"-"`
+	UpdatedAt string     `json:"updated_at,omitempty"`
 }
 
 // Get 取单个配置项。
@@ -46,6 +49,7 @@ func (s *SettingStore) Get(ctx context.Context, key string) (Setting, error) {
 	return Setting{
 		Key:       row.Key,
 		Value:     json.RawMessage(row.Value),
+		UpdatedBy: fromUUID(row.UpdatedBy),
 		UpdatedAt: row.UpdatedAt.UTC().Format(timeFormat),
 	}, nil
 }
@@ -61,6 +65,7 @@ func (s *SettingStore) List(ctx context.Context) ([]Setting, error) {
 		out = append(out, Setting{
 			Key:       row.Key,
 			Value:     json.RawMessage(row.Value),
+			UpdatedBy: fromUUID(row.UpdatedBy),
 			UpdatedAt: row.UpdatedAt.UTC().Format(timeFormat),
 		})
 	}
@@ -83,6 +88,7 @@ func (s *SettingStore) Upsert(ctx context.Context, key string, value json.RawMes
 	return Setting{
 		Key:       row.Key,
 		Value:     json.RawMessage(row.Value),
+		UpdatedBy: fromUUID(row.UpdatedBy),
 		UpdatedAt: row.UpdatedAt.UTC().Format(timeFormat),
 	}, nil
 }
@@ -131,6 +137,15 @@ func toUUID(id *uuid.UUID) pgtype.UUID {
 		return pgtype.UUID{}
 	}
 	return pgtype.UUID{Bytes: *id, Valid: true}
+}
+
+// fromUUID 把库里的 NULL 翻成 nil(没人改过)。
+func fromUUID(id pgtype.UUID) *uuid.UUID {
+	if !id.Valid {
+		return nil
+	}
+	v := uuid.UUID(id.Bytes)
+	return &v
 }
 
 // timeFormat 是配置项 updated_at 的输出格式。

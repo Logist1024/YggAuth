@@ -30,6 +30,9 @@ type storedCred struct {
 	hash           string
 	failedAttempts int
 	lockedUntil    *time.Time
+	// mustChange 是首登强制改密真源(见迁移 00008),fake 必须如实保留:
+	// 真实的 UpsertCredential 不动这一列,只有 SetMustChange 改它。
+	mustChange bool
 }
 
 func newFakeRepo(clk *clock.Mock) *fakeRepo {
@@ -138,8 +141,22 @@ func (r *fakeRepo) List(context.Context, account.ListFilter) ([]domain.Account, 
 func (r *fakeRepo) UpsertCredential(_ context.Context, accountID uuid.UUID, algo account.Algo, hash string) (account.Credential, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.creds[accountID] = storedCred{hash: hash}
+	prev := r.creds[accountID]
+	// 与 SQL 一致:清失败计数与锁定,但**不动** must_change
+	r.creds[accountID] = storedCred{hash: hash, mustChange: prev.mustChange}
 	return account.Credential{AccountID: accountID, Algo: algo, Hash: hash}, nil
+}
+
+func (r *fakeRepo) SetMustChange(_ context.Context, accountID uuid.UUID, _ account.Algo, mustChange bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c, ok := r.creds[accountID]
+	if !ok {
+		return apperr.ErrNotFound
+	}
+	c.mustChange = mustChange
+	r.creds[accountID] = c
+	return nil
 }
 
 func (r *fakeRepo) GetCredential(_ context.Context, accountID uuid.UUID, algo account.Algo) (account.Credential, error) {
@@ -154,6 +171,7 @@ func (r *fakeRepo) GetCredential(_ context.Context, accountID uuid.UUID, algo ac
 		Algo:           algo,
 		Hash:           c.hash,
 		FailedAttempts: c.failedAttempts,
+		MustChange:     c.mustChange,
 	}
 	if c.lockedUntil != nil {
 		t := *c.lockedUntil

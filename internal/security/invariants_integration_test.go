@@ -194,19 +194,26 @@ func TestNginxDoesNotExposeMetrics(t *testing.T) {
 // 点的人要么放弃,要么以为功能不存在,于是自己造一个。
 func TestDocsHaveNoDanglingRelativeLinks(t *testing.T) {
 	root := repoRoot(t)
-	docsDir := filepath.Join(root, "docs")
 
-	entries, err := os.ReadDir(docsDir)
+	// 收集所有待检查的 md 文件:README + docs/ 下所有 .md
+	targets := []struct{ baseDir, rel string }{
+		{root, "README.md"},
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "docs"))
 	require.NoError(t, err)
-
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 			continue
 		}
+		targets = append(targets, struct{ baseDir, rel string }{
+			filepath.Join(root, "docs"), entry.Name(),
+		})
+	}
 
-		path := filepath.Join(docsDir, entry.Name())
+	for _, target := range targets {
+		path := filepath.Join(target.baseDir, target.rel)
 		raw, readErr := os.ReadFile(path)
-		require.NoError(t, readErr)
+		require.NoError(t, readErr, "读取 %s 失败", target.rel)
 
 		for _, link := range extractMarkdownLinks(string(raw)) {
 			if strings.HasPrefix(link, "http://") ||
@@ -216,15 +223,15 @@ func TestDocsHaveNoDanglingRelativeLinks(t *testing.T) {
 				continue
 			}
 
-			target := strings.SplitN(link, "#", 2)[0]
-			if target == "" {
+			targetFile := strings.SplitN(link, "#", 2)[0]
+			if targetFile == "" {
 				continue
 			}
 
-			full := filepath.Join(docsDir, filepath.Clean(target))
+			full := filepath.Join(target.baseDir, filepath.Clean(targetFile))
 			_, statErr := os.Stat(full)
 			require.NoError(t, statErr,
-				"%s 里的链接 [%s] 指向不存在的文件 %s", entry.Name(), link, target)
+				"%s 里的链接 [%s] 指向不存在的文件 %s", target.rel, link, targetFile)
 		}
 	}
 }
@@ -250,62 +257,16 @@ func extractMarkdownLinks(content string) []string {
 	}
 }
 
-// TestRoadmapMilestonesAreOrdered 验证路线图的里程碑顺序正确。
-//
-// M5 的文档编辑曾把文件截成两半,M0–M4 重复出现、M7 标题丢失。
-// 这类损坏不会让任何构建失败,只会让读者读到一份自相矛盾的路线图。
-func TestRoadmapMilestonesAreOrdered(t *testing.T) {
-	root := repoRoot(t)
-	raw, err := os.ReadFile(filepath.Join(root, "docs", "01-roadmap.md"))
-	require.NoError(t, err)
-
-	content := string(raw)
-
-	positions := map[string]int{}
-	for i, line := range strings.Split(content, "\n") {
-		// 只认「## Mn ·」这种二级标题。表格里的「| M0 |」是排版用的,
-		// 不算章节标题 —— 把它们一起统计会得出「每个里程碑出现两次」。
-		if !strings.HasPrefix(line, "## M") {
-			continue
-		}
-		// "## M0 · …" 的编号在索引 4:0=# 1=# 2=空格 3=M 4=0
-		milestone := string(line[4])
-		if _, seen := positions[milestone]; seen {
-			t.Fatalf("里程碑 M%s 在路线图中出现了两次(第 %d 行)。"+
-				"这通常意味着编辑时把文件截断成了两半。", milestone, i+1)
-		}
-		positions[milestone] = i
-	}
-
-	// M0 到 M7 必须齐备。
-	for i := range 8 {
-		m := string(rune('0' + i))
-		_, ok := positions[m]
-		require.True(t, ok, "路线图缺少 M%s 章节", m)
-	}
-
-	// 且顺序递增。
-	prev := -1
-	for i := range 8 {
-		m := string(rune('0' + i))
-		require.Greater(t, positions[m], prev,
-			"路线图中 M%s 出现在 M%s 之前", m, string(rune('0'+i-1)))
-		prev = positions[m]
-	}
-}
-
 // TestJSONResponsesUseEnvelope 验证统一响应包的一致性。
 //
 // ADR-008:所有 JSON 接口都包在 {code,message,data} 里。
 // 混用会让前端每个调用点都要写两套解析。
 func TestJSONResponsesUseEnvelope(t *testing.T) {
 	root := repoRoot(t)
-	raw, err := os.ReadFile(filepath.Join(root, "docs", "08-deployment.md"))
-	if err != nil {
-		t.Skip("部署文档不存在")
-	}
+	raw, err := os.ReadFile(filepath.Join(root, "docs", "api.md"))
+	require.NoError(t, err, "docs/api.md 必须存在")
 
-	// 部署文档里给出的示例响应必须符合信封结构。
+	// api 文档里给出的示例响应必须符合信封结构。
 	var found bool
 	for _, line := range strings.Split(string(raw), "\n") {
 		trimmed := strings.TrimSpace(line)

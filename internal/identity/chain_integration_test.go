@@ -32,6 +32,9 @@ import (
 type env struct {
 	handler http.Handler
 	svc     *identity.Service
+	// pool 与 handler 指向同一个库:首启引导、直接查表这类
+	// 「绕过 service 的断言」需要它,否则这类用例只能各起一套装配。
+	pool *testdb.Pool
 }
 
 // newEnv 用真实 PostgreSQL 装配完整账号内核与路由。
@@ -91,7 +94,7 @@ func newEnv(t *testing.T) *env {
 		},
 	}).Handler()
 
-	return &env{handler: handler, svc: svc}
+	return &env{handler: handler, svc: svc, pool: pool}
 }
 
 type nopLogger struct{}

@@ -40,7 +40,7 @@ export default defineConfig({
   },
   server: {
     port: 5174,
-    // 同 account 应用:后端在 3000(docs/08-deployment.md 第九节)。
+    // 同 account 应用:后端在 3000(docs/deployment.md 第九节)。
     proxy: {
       '/api': 'http://127.0.0.1:3000',
       '/oauth': 'http://127.0.0.1:3000',

@@ -49,6 +49,11 @@ WHERE account_id = $1 AND revoked_at IS NULL
 -- name: LinkSessionToSSO :exec
 UPDATE identity.session SET sso_session_id = $2 WHERE id = $1;
 
+-- name: SetSessionMustChangePassword :exec
+-- 把凭据上的 must_change 真源投到本次会话上,认证中间件读这一列即可,
+-- 不必为判断强制改密在每个请求上多查一次凭据(见迁移 00008 的注释)。
+UPDATE identity.session SET must_change_password = $2 WHERE id = $1;
+
 -- name: GetSessionBySSOID :many
 -- 全局登出:把同一 SSO 会话下的所有终端用户会话一起吊销。
 SELECT * FROM identity.session

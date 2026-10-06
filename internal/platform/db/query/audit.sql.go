@@ -144,7 +144,7 @@ type InsertAuditEventParams struct {
 	Metadata   []byte      `json:"metadata"`
 }
 
-// 审计表只追加,应用层没有任何删除接口(见 docs/09-security.md 9.2)。
+// 审计表只追加,应用层没有任何删除接口(见 docs/security.md 9.2)。
 func (q *Queries) InsertAuditEvent(ctx context.Context, arg InsertAuditEventParams) (IdentityAuditEvent, error) {
 	row := q.db.QueryRow(ctx, insertAuditEvent,
 		arg.AccountID,

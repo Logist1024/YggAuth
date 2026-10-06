@@ -54,7 +54,7 @@ type MCError struct {
 	Cause        string `json:"cause,omitempty"`
 }
 
-// 协议错误码(与 docs/06-mc-protocol.md 一致)。
+// 协议错误码(与 docs/minecraft.md 一致)。
 const (
 	// ErrCodeForbiddenOperation 对应 mc_login_enabled=false
 	ErrCodeForbiddenOperation = "ForbiddenOperation"

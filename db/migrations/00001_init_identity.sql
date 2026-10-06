@@ -2,7 +2,7 @@
 --
 -- 域中立性(ADR-005 / ADR-010):本 schema 只认识「身份 + 凭据 + 会话 + 权限」,
 -- 不得出现任何具体业务域的语义。account.mc_login_enabled 是唯一的例外,
--- 它只是一个通用布尔开关,内核不理解其含义(见 docs/03-data-model.md 第一节)。
+-- 它只是一个通用布尔开关,内核不理解其含义(见 docs/data-model.md 第一节)。
 
 -- +goose Up
 -- +goose StatementBegin

@@ -61,6 +61,7 @@ type IdentityCredential struct {
 	FailedAttempts int32              `json:"failed_attempts"`
 	LockedUntil    pgtype.Timestamptz `json:"locked_until"`
 	ChangedAt      time.Time          `json:"changed_at"`
+	MustChange     bool               `json:"must_change"`
 }
 
 type IdentityEmailToken struct {
@@ -107,18 +108,19 @@ type IdentityRolePermission struct {
 }
 
 type IdentitySession struct {
-	ID            uuid.UUID          `json:"id"`
-	AccountID     uuid.UUID          `json:"account_id"`
-	TokenHash     []byte             `json:"token_hash"`
-	SsoSessionID  pgtype.UUID        `json:"sso_session_id"`
-	CreatedAt     time.Time          `json:"created_at"`
-	LastSeenAt    time.Time          `json:"last_seen_at"`
-	ExpiresAt     time.Time          `json:"expires_at"`
-	IdleExpiresAt time.Time          `json:"idle_expires_at"`
-	RevokedAt     pgtype.Timestamptz `json:"revoked_at"`
-	RevokeReason  pgtype.Text        `json:"revoke_reason"`
-	Ip            *netip.Addr        `json:"ip"`
-	UserAgent     pgtype.Text        `json:"user_agent"`
+	ID                 uuid.UUID          `json:"id"`
+	AccountID          uuid.UUID          `json:"account_id"`
+	TokenHash          []byte             `json:"token_hash"`
+	SsoSessionID       pgtype.UUID        `json:"sso_session_id"`
+	CreatedAt          time.Time          `json:"created_at"`
+	LastSeenAt         time.Time          `json:"last_seen_at"`
+	ExpiresAt          time.Time          `json:"expires_at"`
+	IdleExpiresAt      time.Time          `json:"idle_expires_at"`
+	RevokedAt          pgtype.Timestamptz `json:"revoked_at"`
+	RevokeReason       pgtype.Text        `json:"revoke_reason"`
+	Ip                 *netip.Addr        `json:"ip"`
+	UserAgent          pgtype.Text        `json:"user_agent"`
+	MustChangePassword bool               `json:"must_change_password"`
 }
 
 type MinecraftAccessToken struct {

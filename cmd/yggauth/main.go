@@ -4,6 +4,7 @@
 //
 //	serve       启动 HTTP 服务(默认)
 //	migrate     执行数据库迁移(up / down / status)
+//	admin       运维子命令:create 手工创建平台管理员
 //	healthcheck 供容器探针调用,探测 /health/ready
 //	version     打印版本信息
 package main
@@ -55,13 +56,15 @@ func run() error {
 		return runServe(os.Args[1:])
 	case "migrate":
 		return runMigrate(os.Args[1:])
+	case "admin":
+		return runAdmin(os.Args[1:])
 	case "healthcheck":
 		return runHealthcheck(os.Args[1:])
 	case "version":
 		fmt.Println(versionString())
 		return nil
 	default:
-		return fmt.Errorf("未知子命令 %q,可用:serve / migrate / healthcheck / version", cmd)
+		return fmt.Errorf("未知子命令 %q,可用:serve / migrate / admin / healthcheck / version", cmd)
 	}
 }
 
@@ -92,7 +95,7 @@ func runServe(args []string) error {
 		AddSource: cfg.Log.AddSource,
 	})
 
-	// 启动日志只打配置摘要,敏感项脱敏(docs/09-security.md 6.3)
+	// 启动日志只打配置摘要,敏感项脱敏(docs/security.md 6.3)
 	for k, v := range cfg.Redacted() {
 		logger.Info("config", "key", k, "value", v)
 	}
@@ -116,6 +119,11 @@ func runServe(args []string) error {
 		if err := runMigrations(ctx, pool, cfg, logger); err != nil {
 			return err
 		}
+	}
+
+	// 首启引导:迁移之后、监听之前(理由见 runBootstrap 注释)
+	if err := runBootstrap(ctx, pool, cfg, logger); err != nil {
+		return err
 	}
 
 	rt := transport.New(buildDeps(cfg, logger, pool))

@@ -46,6 +46,14 @@ export const useAdminStore = defineStore('admin', () => {
    * 否则刚打开站点、本来就没登录的人也会看到一句「已过期」。
    */
   const notice = ref<string | null>(null)
+  /**
+   * 会话要求先改密码(首登强制改密,后端 20013)。
+   *
+   * 置位期间后台的 `/api/admin/*` 全部会被后端挡下,所以 load()
+   * 会**先**问一个放行名单里的接口拿到这个旗标,再决定要不要去拉
+   * 权限与菜单 —— 顺序反了,首屏就是一屏红错而不是改密页。
+   */
+  const mustChangePassword = ref(false)
 
   const api = new ApiClient({
     // 与账号站一致:会话是 HttpOnly cookie,前端没有可拿去刷新的
@@ -94,6 +102,26 @@ export const useAdminStore = defineStore('admin', () => {
   async function load(): Promise<void> {
     loading.value = true
     try {
+      // 第一步只问 /api/auth/session:它在首登强制改密的放行名单里。
+      // 直接并进下面那次 Promise.all 的话,旗标一置位这两个请求就会
+      // 撞上 20013,整次 load 以红错告终 —— 而正确结果只是「去改密页」。
+      const session = await api.get<{
+        // 与 /api/admin/me 的 account 同形(后端只给这三个字段),
+        // 所以类型仍按 AdminAccount 走,这里不再另造一份。
+        account: AdminAccount
+        permissions: string[]
+        must_change_password?: boolean
+      }>('/api/auth/session')
+      mustChangePassword.value = session.must_change_password === true
+      account.value = session.account
+      if (mustChangePassword.value) {
+        // 改密之前不拉权限与菜单:它们都在 /api/admin/* 下,后端会挡;
+        // 改密成功会重新走一遍 load,到时候再取。
+        permissions.value = []
+        menu.value = []
+        return
+      }
+
       // 一次取齐:账号、权限、菜单。分三次取会让首屏出现
       // 「菜单闪一下再变化」,而那正好是管理员判断
       // 「我到底能不能看这一项」最容易被误导的时刻。
@@ -118,13 +146,25 @@ export const useAdminStore = defineStore('admin', () => {
     }
   }
 
+  /**
+   * 本地清会话。
+   *
+   * 改密码之后后端已经吊销了全部会话并清了 cookie,这里再发一次
+   * /api/auth/logout 只会拿回 401 —— 所以「退出」与「改密后的被动
+   * 下线」共用这个纯本地动作,真正的登出请求只在 logout() 里发。
+   */
+  function clearSession(): void {
+    account.value = null
+    permissions.value = []
+    menu.value = []
+    mustChangePassword.value = false
+  }
+
   async function logout(): Promise<void> {
     try {
       await api.post('/api/auth/logout')
     } finally {
-      account.value = null
-      permissions.value = []
-      menu.value = []
+      clearSession()
       // 主动退出不需要解释,也别把早先那句「已过期」带过去。
       notice.value = null
     }
@@ -140,11 +180,13 @@ export const useAdminStore = defineStore('admin', () => {
     menu,
     loading,
     notice,
+    mustChangePassword,
     api,
     isAuthenticated,
     visibleMenu,
     has,
     load,
+    clearSession,
     clearNotice,
     logout,
   }

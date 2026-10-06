@@ -34,6 +34,50 @@ import (
 func buildDeps(cfg *config.Config, logger *slog.Logger, pool *db.Pool) transport.Deps {
 	clk := clock.New()
 
+	//
+	// 签名密钥管理器做「有就复用、无就生成」,所以首次部署不需要手工初始化步骤。
+	//
+	// 它建在账号内核**之前**:密钥管理器同时是配置表敏感值的加解密器
+	// (同一把 KEY_MASTER_SECRET、同一段 AES-256-GCM 实现),
+	// 而密码策略、注册模式这些内核参数都要先从配置快照读。
+	keyManager, err := keys.NewManager(keys.Options{
+		MasterSecret: cfg.OIDC.KeyMasterSecret,
+		KidPrefix:    "oidc",
+		BitSize:      2048,
+	}, keys.NewPGStore(pool))
+	if err != nil {
+		// 装配失败属于配置错误,直接 panic:带着半套授权服务启动的实例
+		// 比启动失败更难排查,而且会对外提供「看起来能用」的授权端点
+		panic("初始化签名密钥失败: " + err.Error())
+	}
+
+	// ---- 运行时配置(L1)
+	//
+	// env 是首次启动的种子,setting 是运行时的现值(docs/configuration.md 三)。
+	// Sync 负责把种子回填进缺行/没人改过的行,并把「改了 env 也不会生效的键」
+	// 打进启动日志 —— 调用点在迁移之后,所以这里的表一定是新的。
+	settings := config.NewSnapshot(config.SettingsOptions{
+		Store:  config.NewSettingStore(pool),
+		Sealer: keyManager,
+		Cfg:    cfg,
+		Logger: logger,
+	})
+	if err := settings.Sync(context.Background()); err != nil {
+		logger.Warn("settings: 启动回填失败,本轮按库里的现值运行", "error", err)
+	}
+
+	// ---- 发件器(可热替换)
+	//
+	// 初值取**设置里的现值**而不是 env:库里已经配好的 SMTP,
+	// 不该因为重启一次就退回 .env 的旧值。读不出来时退回 env ——
+	// 一行配置读失败不该让整个邮件功能消失。
+	mailCfg, err := settings.MailerConfig(context.Background())
+	if err != nil {
+		logger.Warn("mail: 读取设置失败,本轮按 env 配置发信", "error", err)
+		mailCfg = mailerCfg(cfg)
+	}
+	mailerHot := mailer.NewHot(mailCfg, logger)
+
 	// ---- 账号内核
 	identitySvc := identity.New(identity.Deps{
 		Accounts: account.NewPgRepository(pool),
@@ -42,37 +86,28 @@ func buildDeps(cfg *config.Config, logger *slog.Logger, pool *db.Pool) transport
 		RBAC:     rbac.NewPgRepository(pool),
 		Audit:    audit.NewPgRepository(pool),
 
-		Hasher: account.NewHasher(account.Params{
-			MemoryKiB:   uint32(cfg.Auth.Argon2MemoryKiB),
-			Iterations:  uint32(cfg.Auth.Argon2Iterations),
-			Parallelism: uint8(cfg.Auth.Argon2Parallelism),
-			SaltLength:  16,
-			KeyLength:   32,
-		}),
-		Clock: clk,
+		Hasher: newHasher(cfg),
+		Clock:  clk,
 		Account: account.Config{
-			Policy: account.Policy{
-				MinLength:       cfg.Auth.PasswordMinLength,
-				MaxLength:       cfg.Auth.PasswordMaxLength,
-				RejectCommon:    cfg.Auth.PasswordRejectCommon,
-				CommonPasswords: account.CommonPasswordSet(),
-			},
+			Settings:            settings,
+			Policy:              newPolicy(cfg),
 			LoginEnabledDefault: cfg.Auth.MCLoginDefault,
 			Invitations:         account.NewInvitationStore(pool),
 			MaxFailedAttempts:   cfg.Auth.LoginMaxFailedAttempts,
 			LockDuration:        cfg.Auth.LoginLockDuration,
 			EmailTokenTTL:       cfg.Auth.EmailTokenTTL,
 			RegistrationMode:    cfg.Auth.RegistrationMode,
-			Mailer:              mailer.New(mailerCfg(cfg), logger),
+			Mailer:              mailerHot,
 			// 邮件真的会送到收件人手里时,验证令牌只从邮件这一条路出去,
 			// 注册响应不再内联 verify_url(见 account.Config.HideVerifyURL)
-			HideVerifyURL: cfg.Mail.Transport == "smtp",
+			HideVerifyURL: mailCfg.Transport == "smtp",
 			// 邮件里的验证/重置链接用它拼(BaseURL 已去掉结尾斜杠)
 			PublicBaseURL:    cfg.App.BaseURL(),
 			VerifyCooldown:   cfg.Mail.VerifyCooldown,
 			VerifyDailyLimit: cfg.Mail.VerifyDailyLimit,
 		},
 		Session: session.Config{
+			Settings:       settings,
 			IdleTTL:        cfg.Auth.SessionIdleTTL,
 			MaxTTL:         cfg.Auth.SessionMaxTTL,
 			MaxConcurrent:  0,
@@ -95,18 +130,8 @@ func buildDeps(cfg *config.Config, logger *slog.Logger, pool *db.Pool) transport
 	)
 
 	//
-	// 密钥管理器做「有就复用、无就生成」,所以首次部署不需要手工初始化步骤。
-	keyManager, err := keys.NewManager(keys.Options{
-		MasterSecret: cfg.OIDC.KeyMasterSecret,
-		KidPrefix:    "oidc",
-		BitSize:      2048,
-	}, keys.NewPGStore(pool))
-	if err != nil {
-		// 装配失败属于配置错误,直接 panic:带着半套授权服务启动的实例
-		// 比启动失败更难排查,而且会对外提供「看起来能用」的授权端点
-		panic("初始化签名密钥失败: " + err.Error())
-	}
-
+	// 密钥管理器在函数开头就建好了(它还是配置敏感值的 Sealer),
+	// 这里不再重复创建。
 	oidcServer, err := oidc.NewServer(cfg, pool, clk, keyManager, loggerAdapter{logger})
 	if err != nil {
 		panic("装配授权服务失败: " + err.Error())
@@ -144,6 +169,7 @@ func buildDeps(cfg *config.Config, logger *slog.Logger, pool *db.Pool) transport
 		TokenTTL:          mcTokenTTL(cfg),
 		HasJoinedWindow:   cfg.MC.HasJoinedWindow,
 		NameRetentionDays: cfg.MC.NameRetentionDays,
+		Settings:          settings,
 	})
 	mcService.WithSecretResolver(mcServiceResolver(pool))
 	mcService.WithSecretResolver(mcServiceResolver(pool))
@@ -193,16 +219,18 @@ func buildDeps(cfg *config.Config, logger *slog.Logger, pool *db.Pool) transport
 		Identity:      identitySvc,
 		OIDC:          oidcServer.Clients,
 		OIDCKeys:      keyManager,
-		Settings:      config.NewSettingStore(pool),
+		Settings:      settings,
+		Mailer:        mailerHot,
 		DB:            pool,
 		PublicBaseURL: cfg.App.BaseURL(),
 	})
 
 	return transport.Deps{
-		Config: cfg,
-		Logger: logger,
-		DB:     pool,
-		Clock:  clk,
+		Config:   cfg,
+		Logger:   logger,
+		DB:       pool,
+		Clock:    clk,
+		Settings: settings,
 		MC: transport.MCDeps{
 			Service:        mcService,
 			Handler:        mcHandler,
@@ -236,7 +264,7 @@ func buildDeps(cfg *config.Config, logger *slog.Logger, pool *db.Pool) transport
 // cookieDomain 推导 cookie 域。
 //
 // 留空时按 APP_PUBLIC_DOMAIN 推导**父域**,让同一主域下的多个子站共享登录态
-// (docs/08-deployment.md 5.1)。localhost 没有父域,必须留空。
+// (docs/deployment.md 5.1)。localhost 没有父域,必须留空。
 func cookieDomain(cfg *config.Config) string {
 	if cfg.OIDC.CookieDomain != "" {
 		return cfg.OIDC.CookieDomain
@@ -269,6 +297,30 @@ func sameSite(v string) http.SameSite {
 		return http.SameSiteNoneMode
 	default:
 		return http.SameSiteLaxMode
+	}
+}
+
+// newHasher 构造 argon2id 哈希器。
+//
+// 账号内核与首启引导必须共用同一个实现:引导建出来的号和注册出来的号
+// 若参数不一致,登录时 Verify 会对着同一列 hash 读出不同的参数解释。
+func newHasher(cfg *config.Config) *account.Hasher {
+	return account.NewHasher(account.Params{
+		MemoryKiB:   uint32(cfg.Auth.Argon2MemoryKiB),
+		Iterations:  uint32(cfg.Auth.Argon2Iterations),
+		Parallelism: uint8(cfg.Auth.Argon2Parallelism),
+		SaltLength:  16,
+		KeyLength:   32,
+	})
+}
+
+// newPolicy 构造密码策略。同理,引导密码与注册密码走同一把尺子。
+func newPolicy(cfg *config.Config) account.Policy {
+	return account.Policy{
+		MinLength:       cfg.Auth.PasswordMinLength,
+		MaxLength:       cfg.Auth.PasswordMaxLength,
+		RejectCommon:    cfg.Auth.PasswordRejectCommon,
+		CommonPasswords: account.CommonPasswordSet(),
 	}
 }
 

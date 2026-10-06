@@ -206,7 +206,7 @@ func toString(v any) string {
 func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		// 点击劫持防护(docs/09-security.md 3.1)
+		// 点击劫持防护(docs/security.md 3.1)
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")

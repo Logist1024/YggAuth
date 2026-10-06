@@ -1,5 +1,5 @@
 # golangci-lint v2 配置
-# 依据 docs/01-roadmap.md M0:gofumpt + errcheck + staticcheck 为必需项。
+# 依据 docs/development.md M0:gofumpt + errcheck + staticcheck 为必需项。
 version: "2"
 
 run:

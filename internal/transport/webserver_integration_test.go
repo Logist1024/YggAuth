@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/google/uuid"
+
 	"github.com/yggauth/yggauth/internal/admin"
 	"github.com/yggauth/yggauth/internal/config"
 	"github.com/yggauth/yggauth/internal/identity"
@@ -46,11 +47,32 @@ func newSPAHandler(t *testing.T) http.Handler {
 	clk := clock.New()
 	cfg := testConfig()
 	cfg.App.PublicBaseURL = webBase
+	cfg.Auth.RegistrationMode = "open"
+	cfg.Auth.PasswordMinLength = 8
+	cfg.Auth.PasswordMaxLength = 128
+	cfg.Auth.LoginMaxFailedAttempts = 5
 	cfg.Auth.SessionIdleTTL = 168 * time.Hour
 	cfg.Auth.SessionMaxTTL = 720 * time.Hour
 	cfg.OIDC.KeyMasterSecret = "web-test-master-secret-at-least-32-bytes"
 	cfg.MC.ServerSharedSecret = "web-test-shared-secret"
 	cfg.MC.HasJoinedWindow = 3 * time.Minute
+
+	// ---- OIDC 密钥先建:它同时是配置快照里敏感值的 Sealer
+	// (与生产装配顺序一致:密钥管理器建在账号内核之前)。
+	oidcKeys, err := keys.NewManager(keys.Options{
+		MasterSecret: cfg.OIDC.KeyMasterSecret,
+		KidPrefix:    "oidc",
+		BitSize:      2048,
+	}, keys.NewPGStore(pool))
+	require.NoError(t, err)
+
+	// ---- 运行时配置:env 是种子,setting 是现值,Sync 就是那条边界。
+	settings := config.NewSnapshot(config.SettingsOptions{
+		Store:  config.NewSettingStore(pool),
+		Sealer: oidcKeys,
+		Cfg:    cfg,
+	})
+	require.NoError(t, settings.Sync(t.Context()))
 
 	identitySvc := identity.New(identity.Deps{
 		Accounts: account.NewPgRepository(pool),
@@ -61,19 +83,19 @@ func newSPAHandler(t *testing.T) http.Handler {
 		Hasher: account.NewHasher(account.Params{
 			MemoryKiB: 8 * 1024, Iterations: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32,
 		}),
-		Clock:   clk,
-		Account: account.Config{Policy: account.Policy{MinLength: 8, MaxLength: 128}, RegistrationMode: "open", LoginEnabledDefault: true, MaxFailedAttempts: 5, LockDuration: time.Minute, EmailTokenTTL: time.Hour},
-		Session: session.Config{IdleTTL: 168 * time.Hour, MaxTTL: 720 * time.Hour},
+		Clock: clk,
+		Account: account.Config{
+			Settings:            settings,
+			Policy:              account.Policy{MinLength: 8, MaxLength: 128},
+			RegistrationMode:    "open",
+			LoginEnabledDefault: true,
+			MaxFailedAttempts:   5,
+			LockDuration:        time.Minute,
+			EmailTokenTTL:       time.Hour,
+		},
+		Session: session.Config{IdleTTL: 168 * time.Hour, MaxTTL: 720 * time.Hour, Settings: settings},
 		Logger:  nopLogger{},
 	})
-
-	// ---- OIDC
-	oidcKeys, err := keys.NewManager(keys.Options{
-		MasterSecret: cfg.OIDC.KeyMasterSecret,
-		KidPrefix:    "oidc",
-		BitSize:      2048,
-	}, keys.NewPGStore(pool))
-	require.NoError(t, err)
 
 	oidcServer, err := oidc.NewServer(cfg, pool, clk, oidcKeys, nopLogger{})
 	require.NoError(t, err)
@@ -126,7 +148,7 @@ func newSPAHandler(t *testing.T) http.Handler {
 			Service: identitySvc,
 			Handler: admin.NewHandler(admin.Deps{
 				Identity:      identitySvc,
-				Settings:      config.NewSettingStore(pool),
+				Settings:      settings,
 				OIDC:          oidc.NewClientService(pool, oidc.NewSecretHasher(secretHasher)),
 				OIDCKeys:      oidcKeys,
 				DB:            pool,
@@ -134,10 +156,11 @@ func newSPAHandler(t *testing.T) http.Handler {
 				PublicBaseURL: webBase,
 			}),
 		},
-		Config: cfg,
-		Logger: nopLogger{},
-		DB:     pool,
-		Clock:  clk,
+		Config:   cfg,
+		Logger:   nopLogger{},
+		DB:       pool,
+		Clock:    clk,
+		Settings: settings,
 		Identity: transport.IdentityDeps{
 			Service: identitySvc,
 			Cookie:  transport.AuthConfig{CookieName: "ygg_session"},

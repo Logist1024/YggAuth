@@ -15,6 +15,12 @@ SELECT * FROM identity.role WHERE id = $1;
 -- name: GetRoleByCode :one
 SELECT * FROM identity.role WHERE code = $1;
 
+-- name: GetRoleForUpdate :one
+-- 行级排他锁。首启引导用它把「并发创建管理员」串行化:
+-- 这行由基线迁移种下、且带 is_system,永远存在,是天然的锁对象,
+-- 不必引入魔数式的 advisory lock 键。
+SELECT * FROM identity.role WHERE code = $1 FOR UPDATE;
+
 -- name: ListRoles :many
 SELECT * FROM identity.role
 WHERE (sqlc.narg('search')::text IS NULL OR code LIKE sqlc.narg('search') OR name LIKE sqlc.narg('search'))

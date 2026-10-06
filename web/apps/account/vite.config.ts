@@ -34,7 +34,7 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    // 后端跑在 3000(见 docs/08-deployment.md 第九节:Vite dev server
+    // 后端跑在 3000(见 docs/deployment.md 第九节:Vite dev server
     // 代理 /api /oauth /mc 到后端 3000)。写成 8080 会让开发模式下
     // 所有接口 502,而浏览器只看到「后端挂了」。
     proxy: {

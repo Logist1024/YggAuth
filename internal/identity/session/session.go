@@ -22,7 +22,7 @@ import (
 	"github.com/yggauth/yggauth/internal/platform/db/query"
 )
 
-// tokenBytes 是会话令牌的熵。docs/09-security.md 3.2 要求 32 字节 CSPRNG。
+// tokenBytes 是会话令牌的熵。docs/security.md 3.2 要求 32 字节 CSPRNG。
 const tokenBytes = 32
 
 // Config 是会话策略。
@@ -36,6 +36,14 @@ type Config struct {
 	// RenewThreshold 是「剩余空闲时间低于该值才续期」的阈值。
 	// 每次请求都写库会给数据库带来不必要压力,按阈值续期足够精确。
 	RenewThreshold time.Duration
+	// Settings 是运行时配置快照:会话时长后台可改,**不重启生效**。
+	// 为 nil 时退回 Config 里由 env 定下的值。
+	Settings Settings
+}
+
+// Settings 是运行时配置的读取能力(见 docs/configuration.md §6.1)。
+type Settings interface {
+	Int(ctx context.Context, key string, fallback int) int
 }
 
 // Repository 是会话的数据访问接口。
@@ -49,6 +57,8 @@ type Repository interface {
 	Revoke(ctx context.Context, id uuid.UUID, reason string) error
 	RevokeAll(ctx context.Context, accountID uuid.UUID, reason string) error
 	LinkSSO(ctx context.Context, id uuid.UUID, ssoSessionID uuid.UUID) error
+	// SetMustChangePassword 切换本会话的「强制改密」投影像(见迁移 00008)。
+	SetMustChangePassword(ctx context.Context, id uuid.UUID, mustChange bool) error
 	DeleteExpired(ctx context.Context, before time.Time) (int64, error)
 	RevokeBySSO(ctx context.Context, ssoSessionID uuid.UUID, reason string) error
 }
@@ -92,6 +102,20 @@ type Issued struct {
 	IdleExpiresAt time.Time
 }
 
+// ttls 返回当前生效的空闲/绝对超时。
+//
+// 每次都现读:会话时长是后台可改的键,签发时读一次配置缓存的话,
+// 管理员调长会话时长后新会话依旧是老时长。
+func (s *Service) ttls(ctx context.Context) (idle, max time.Duration) {
+	idle, max = s.cfg.IdleTTL, s.cfg.MaxTTL
+	if s.cfg.Settings == nil {
+		return idle, max
+	}
+	idle = time.Duration(s.cfg.Settings.Int(ctx, "session.idle_ttl_hours", int(idle.Hours()))) * time.Hour
+	max = time.Duration(s.cfg.Settings.Int(ctx, "session.max_ttl_hours", int(max.Hours()))) * time.Hour
+	return idle, max
+}
+
 // Issue 签发新会话。
 func (s *Service) Issue(ctx context.Context, accountID uuid.UUID, ip, userAgent string) (Issued, error) {
 	plain, hash, err := newToken()
@@ -100,7 +124,8 @@ func (s *Service) Issue(ctx context.Context, accountID uuid.UUID, ip, userAgent 
 	}
 
 	now := s.clock.Now()
-	exp := now.Add(s.cfg.MaxTTL)
+	idleTTL, maxTTL := s.ttls(ctx)
+	exp := now.Add(maxTTL)
 
 	// 并发上限:超出时踢掉最早的会话。
 	// 选「踢最早的」而不是「拒绝新登录」,是因为用户自己通常不会同时开多个浏览器,
@@ -138,7 +163,7 @@ func (s *Service) Issue(ctx context.Context, accountID uuid.UUID, ip, userAgent 
 		AccountID:     accountID,
 		TokenHash:     hash,
 		ExpiresAt:     exp,
-		IdleExpiresAt: now.Add(s.cfg.IdleTTL),
+		IdleExpiresAt: now.Add(idleTTL),
 		IP:            ip,
 		UserAgent:     truncateUA(userAgent),
 	})
@@ -152,6 +177,17 @@ func (s *Service) Issue(ctx context.Context, accountID uuid.UUID, ip, userAgent 
 		ExpiresAt:     exp,
 		IdleExpiresAt: sess.IdleExpiresAt,
 	}, nil
+}
+
+// MarkMustChangePassword 把凭据上的「必须改密」真源投到本次会话。
+//
+// 登录成功时调用:认证中间件每个请求都读会话行,读不到额外代价;
+// 真源仍在凭据上,改密时清零并吊销全部会话,这份投影不会残留。
+func (s *Service) MarkMustChangePassword(ctx context.Context, sessionID uuid.UUID, mustChange bool) error {
+	if !mustChange {
+		return nil
+	}
+	return s.repo.SetMustChangePassword(ctx, sessionID, true)
 }
 
 // Authenticated 是一次会话校验的结果。
@@ -186,12 +222,13 @@ func (s *Service) Authenticate(ctx context.Context, plain string) (Authenticated
 	}
 
 	// 剩余空闲时间不足一半时才续期,避免每个请求都写一次库
-	if now.Add(s.cfg.IdleTTL / 2).Before(sess.IdleExpiresAt) {
+	idleTTL, _ := s.ttls(ctx)
+	if now.Add(idleTTL / 2).Before(sess.IdleExpiresAt) {
 		return Authenticated{Session: sess}, nil
 	}
 
 	// 续期后的空闲过期不能越过绝对过期时间
-	idle := now.Add(s.cfg.IdleTTL)
+	idle := now.Add(idleTTL)
 	if idle.After(sess.ExpiresAt) {
 		idle = sess.ExpiresAt
 	}
@@ -285,6 +322,8 @@ func toDomain(row query.IdentitySession) domain.Session {
 		ExpiresAt:     row.ExpiresAt,
 		IdleExpiresAt: row.IdleExpiresAt,
 		UserAgent:     row.UserAgent.String,
+		// 投影像(见迁移 00008 注释):登录时由凭据抄过来,认证中间件只读它
+		MustChangePassword: row.MustChangePassword,
 	}
 	if row.SsoSessionID.Valid {
 		if id, err := uuid.FromBytes(row.SsoSessionID.Bytes[:]); err == nil {
@@ -406,6 +445,17 @@ func (r *PgRepository) LinkSSO(ctx context.Context, id, ssoSessionID uuid.UUID) 
 		SsoSessionID: pgtype.UUID{Bytes: ssoSessionID, Valid: true},
 	}); err != nil {
 		return apperr.Newf(apperr.CodeInternal, "关联 SSO 会话失败: %v", err)
+	}
+	return nil
+}
+
+// SetMustChangePassword 切换本会话的强制改密投影。
+func (r *PgRepository) SetMustChangePassword(ctx context.Context, id uuid.UUID, mustChange bool) error {
+	if err := r.q.SetSessionMustChangePassword(ctx, query.SetSessionMustChangePasswordParams{
+		ID:                 id,
+		MustChangePassword: mustChange,
+	}); err != nil {
+		return apperr.Newf(apperr.CodeInternal, "更新会话强制改密标记失败: %v", err)
 	}
 	return nil
 }

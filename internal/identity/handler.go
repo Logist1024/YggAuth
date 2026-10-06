@@ -34,7 +34,6 @@ type CookieConfig struct {
 // Handler 是账号内核的 HTTP 处理器。
 type Handler struct {
 	svc    *Service
-	policy account.Policy
 	cookie CookieConfig
 	base   string
 }
@@ -42,9 +41,10 @@ type Handler struct {
 // NewHandler 创建账号内核的 HTTP 处理器。
 func NewHandler(svc *Service, cookie CookieConfig, publicBaseURL string) *Handler {
 	base := strings.TrimRight(publicBaseURL, "/")
-	// 策略直接取自服务,而不是重新构造一份:两处各写一遍默认值,
-	// 迟早会因为只改了一处而让前端按旧规则提示用户。
-	return &Handler{svc: svc, policy: svc.Accounts.Policy(), cookie: cookie, base: base}
+	// 这里**不**缓存策略:策略是后台可改的,构造时取一次的话,
+	// 管理员在后台把最小长度从 8 调到 12,注册页会一直提示 8
+	// 然后被后端 400 —— 改了没用,且没人报错。
+	return &Handler{svc: svc, cookie: cookie, base: base}
 }
 
 // Mount 把账号内核的路由挂到 r 上。
@@ -201,6 +201,14 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, err)
 		return
 	}
+	// 引导流程置的首登强制改密旗标,登录这一刻投到会话上:
+	// 之后每个请求由认证中间件读会话行判断,登录响应回给前端立即跳改密页。
+	if auth.MustChangePassword {
+		if err := h.svc.Sessions.MarkMustChangePassword(r.Context(), issued.SessionID, true); err != nil {
+			httpx.Fail(w, err)
+			return
+		}
+	}
 	h.setSessionCookie(w, issued)
 
 	ObserveLogin(true)
@@ -211,6 +219,8 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		"email_verified": auth.Account.EmailVerified,
 		"login_enabled":  auth.Account.MCLoginEnabled,
 		"expires_at":     issued.ExpiresAt.UTC().Format(time.RFC3339),
+		// 首登强制改密:前端据此直接跳转改密页,不必等第一个请求被拦
+		"must_change_password": auth.MustChangePassword,
 	})
 }
 
@@ -257,6 +267,9 @@ func (h *Handler) CurrentSession(w http.ResponseWriter, r *http.Request) {
 		},
 		"session_id":  p.SessionID.String(),
 		"permissions": p.Permissions,
+		// 前端启动时靠这个决定要不要把用户送去改密页:
+		// 页面刷新后,登录响应里的同名字段早没了。
+		"must_change_password": p.MustChangePassword,
 	})
 }
 
@@ -364,7 +377,13 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, err)
 		return
 	}
-	httpx.OK(w, map[string]any{"account": toAccountView(acc)})
+	httpx.OK(w, map[string]any{
+		"account": toAccountView(acc),
+		// 与 /api/auth/session 同源同值(都来自会话行的投影),
+		// 账号站启动时读的正是这个接口,两条路都得带上,
+		// 否则「刷新页面就绕过强制改密」。
+		"must_change_password": p.MustChangePassword,
+	})
 }
 
 // UpdateMe 修改用户名或邮箱。
@@ -577,14 +596,17 @@ func mustAccountID(r *http.Request) uuid.UUID {
 //
 // 公开、无需鉴权:注册页在登录之前就要用这些规则。
 // 只暴露**约束**,不暴露任何配置细节(存储位置、算法参数)。
-func (h *Handler) Policy(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) Policy(w http.ResponseWriter, r *http.Request) {
+	// 现读而不是读构造时的快照:这条端点就是为了让前端「不抄规则」,
+	// 它自己要是拿了旧规则,抄规则的老问题会以另一种形式回来。
+	policy := h.svc.Accounts.Policy(r.Context())
 	httpx.OK(w, map[string]any{
-		"password_min_length":        h.policy.MinLength,
-		"password_max_length":        h.policy.MaxLength,
-		"password_reject_common":     h.policy.RejectCommon,
+		"password_min_length":        policy.MinLength,
+		"password_max_length":        policy.MaxLength,
+		"password_reject_common":     policy.RejectCommon,
 		"username_min_length":        usernameMinLength,
 		"username_max_length":        usernameMaxLength,
-		"registration_mode":          h.svc.Accounts.RegistrationMode(),
+		"registration_mode":          h.svc.Accounts.RegistrationMode(r.Context()),
 		"require_email_verification": true,
 	})
 }

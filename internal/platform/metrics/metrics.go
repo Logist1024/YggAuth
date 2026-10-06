@@ -8,7 +8,7 @@
 // 业务域包自己定义(见 internal/identity 等),
 // 平台层不感知任何业务语义(ADR-010)。
 //
-// 指标清单见 docs/08-deployment.md 第八节。
+// 指标清单见 docs/deployment.md 第八节。
 package metrics
 
 import (

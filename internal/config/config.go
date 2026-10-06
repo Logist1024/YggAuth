@@ -1,6 +1,6 @@
 // Package config 负责从环境变量加载配置并在启动时校验。
 //
-// 两条硬规则(见 docs/08-deployment.md 5.2):
+// 两条硬规则(见 docs/deployment.md 5.2):
 //  1. 必填项缺失或格式错误 → 启动即退出,并一次性列出**全部**问题;
 //  2. 绝不静默使用默认值处理必填项。
 //
@@ -138,6 +138,36 @@ func (r reader) duration(key string, def time.Duration) time.Duration {
 	return d
 }
 
+// seconds 解析 `*_SECONDS` 变量:裸数字按秒,带单位按 time.ParseDuration。
+//
+// 单独一个方法而不是复用 duration,是因为**名字里已经写了 SECONDS**:
+// .env.example 与文档里给的都是 `LOGIN_LOCK_SECONDS=900` 这种裸数字,
+// 而 time.ParseDuration("900") 会因为缺单位直接报错 —— 照文档填反而启动失败。
+// 实测踩过这个坑的有两个变量:LOGIN_LOCK_SECONDS 与 MAIL_VERIFY_COOLDOWN_SECONDS。
+func (r reader) seconds(key string, def time.Duration) time.Duration {
+	v, ok := r.lookup(key)
+	if !ok {
+		return def
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		if n <= 0 {
+			r.col.addf("%s 必须是大于 0 的秒数,当前值: %s", key, v)
+			return def
+		}
+		return time.Duration(n) * time.Second
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		r.col.addf("%s 必须是秒数(900)或时长(15m),当前值: %s", key, v)
+		return def
+	}
+	if d <= 0 {
+		r.col.addf("%s 必须大于 0,当前值: %s", key, v)
+		return def
+	}
+	return d
+}
+
 // csv 读逗号分隔列表并去掉空项。
 func (r reader) csv(key string) []string {
 	v, ok := r.lookup(key)
@@ -166,7 +196,7 @@ func (r reader) oneOf(key, value string, allowed ...string) string {
 
 // ---------------------------------------------------------------- 配置结构
 
-// Config 是全量配置。按 docs/01-roadmap.md M1 的要求分为八组。
+// Config 是全量配置。按 docs/development.md M1 的要求分为八组。
 type Config struct {
 	App     App
 	DB      DB
@@ -176,6 +206,26 @@ type Config struct {
 	MC      MC
 	Mail    Mail
 	Log     Log
+	// Bootstrap 是首启引导(L2 层,见 docs/configuration.md 第五节)。
+	// 只在「库里还没有管理员」的一次性时刻生效,运行期配置以 app.setting 为准。
+	Bootstrap Bootstrap
+}
+
+// Bootstrap 是首启引导配置。
+//
+// 一句话契约:**env 是首次启动的种子,setting 是运行时的现值** ——
+// 这里的每一项都只在首次启动写库一次,之后既不读也不覆盖。
+type Bootstrap struct {
+	// Enabled 为 false 时首启不创建默认管理员(ADMIN_BOOTSTRAP=false)。
+	// 关闭后仍可随时用 `yggauth admin create` 手工建号,不会永久失去管理入口。
+	Enabled bool
+	// Email / Username 是默认管理员的身份,重复启动时不再使用
+	// (已存在管理员即跳过),因此给错也不会覆盖既有账号。
+	Email    string
+	Username string
+	// Password 为空表示随机生成 24 位并**只打印一次**到启动日志。
+	// 留空是更安全的默认:日志里的密码运维看完即弃,不落 .env。
+	Password string
 }
 
 // App 是进程与应用级配置。
@@ -231,7 +281,7 @@ type DB struct {
 	MaxConnLifetime time.Duration
 	MaxConnIdleTime time.Duration
 	ConnectTimeout  time.Duration
-	// AutoMigrate 为真时启动即执行迁移(见 docs/08-deployment.md 第六节)
+	// AutoMigrate 为真时启动即执行迁移(见 docs/deployment.md 第六节)
 	AutoMigrate bool
 }
 
@@ -402,7 +452,7 @@ func Load() (*Config, error) {
 			Argon2Parallelism: r.intBetween("ARGON2_PARALLELISM", 4, 1, 16),
 
 			LoginMaxFailedAttempts: r.intBetween("LOGIN_MAX_FAILED_ATTEMPTS", 5, 1, 100),
-			LoginLockDuration:      r.duration("LOGIN_LOCK_SECONDS", 900*time.Second),
+			LoginLockDuration:      r.seconds("LOGIN_LOCK_SECONDS", 900*time.Second),
 
 			SessionIdleTTL: r.duration("SESSION_IDLE_TTL", 168*time.Hour),
 			SessionMaxTTL:  r.duration("SESSION_MAX_TTL", 720*time.Hour),
@@ -458,8 +508,15 @@ func Load() (*Config, error) {
 			SMTPUsername:     r.str("SMTP_USER", ""),
 			SMTPPassword:     r.str("SMTP_PASSWORD", ""),
 			SMTPTLS:          r.boolVal("SMTP_TLS", true),
-			VerifyCooldown:   r.duration("MAIL_VERIFY_COOLDOWN_SECONDS", 60*time.Second),
+			VerifyCooldown:   r.seconds("MAIL_VERIFY_COOLDOWN_SECONDS", 60*time.Second),
 			VerifyDailyLimit: r.intBetween("MAIL_VERIFY_DAILY_LIMIT", 5, 1, 1000),
+		},
+		Bootstrap: Bootstrap{
+			Enabled:  r.boolVal("ADMIN_BOOTSTRAP", true),
+			Email:    r.str("ADMIN_EMAIL", "admin@localhost.local"),
+			Username: r.str("ADMIN_USERNAME", "admin"),
+			// 秘密项走 str 而不是 required:留空 = 随机生成并打印一次
+			Password: r.str("ADMIN_PASSWORD", ""),
 		},
 		Log: Log{
 			Level:                r.oneOf("LOG_LEVEL", r.str("LOG_LEVEL", "info"), "debug", "info", "warn", "error"),
@@ -541,23 +598,17 @@ func (c *Config) validate(col *collector) {
 		col.addf("SSO_COOKIE_DOMAIN 不能设为 localhost(无父域),必须留空由 APP_PUBLIC_DOMAIN 推导")
 	}
 
-	// CORS 绝不允许通配符配合凭据(见 docs/05-api.md 第八节)。
+	// CORS 绝不允许通配符配合凭据(见 docs/api.md 第八节)。
 	for _, o := range c.OIDC.AllowedOrigins {
 		if o == "*" {
 			col.addf("CORS_ALLOWED_ORIGINS 不能包含通配符 *,它无法与凭据同时使用")
 		}
 	}
 
-	if c.Mail.Transport == "smtp" {
-		if c.Mail.SMTPHost == "" {
-			col.addf("SMTP_HOST 未设置(MAILER_TRANSPORT=smtp 时必填)")
-		}
-		if c.Mail.SMTPUsername == "" {
-			col.addf("SMTP_USER 未设置(MAILER_TRANSPORT=smtp 时必填)")
-		}
-	}
-	if c.Mail.From != "" && !strings.Contains(c.Mail.From, "@") {
-		col.addf("MAILER_FROM 必须是合法邮箱,当前值: %s", c.Mail.From)
+	// 邮件配置的跨字段校验与后台设置共用同一份规则(mail.go)。
+	// env 挡住的错,后台换个入口也必须挡住 —— 两套规则必然漂移。
+	if err := ValidateMailConfig(c.Mail.Transport, c.Mail.From, c.Mail.SMTPHost, c.Mail.SMTPUsername, EnvMailLabels); err != nil {
+		col.addf("%s", err)
 	}
 
 	if c.DB.MinConns > 0 && c.DB.MaxConns > 0 && c.DB.MinConns > c.DB.MaxConns {
@@ -620,6 +671,7 @@ func (c *Config) Redacted() map[string]any {
 		"mc.skin_external":   c.MC.SkinExternal,
 		"mail.transport":     c.Mail.Transport,
 		"mail.from":          c.Mail.From,
+		"admin.bootstrap":    c.Bootstrap.Enabled,
 		"log.level":          c.Log.Level,
 		"log.format":         c.Log.Format,
 	}

@@ -22,7 +22,7 @@ type Cookie struct {
 // SetCookie 写出一个 cookie。
 //
 // HTTPOnly 恒为 true:登录态绝不能被 JavaScript 读到,
-// 否则一次 XSS 就能把整个会话偷走(docs/09-security.md 3.1)。
+// 否则一次 XSS 就能把整个会话偷走(docs/security.md 3.1)。
 func SetCookie(w http.ResponseWriter, c Cookie) {
 	path := c.Path
 	if path == "" {

@@ -256,7 +256,7 @@ async function revoke(role: RoleSummary): Promise<void> {
         <!--
           与筛选下拉一样给个 ×:搜索词多半是敲错了再改,现在只能全选删。
           清空只清输入框,不自动查询 —— 文字筛选的口径是回车/点按钮
-          (每次敲键都发请求不可接受),见 docs/07-frontend.md「列表页通则」。
+          (每次敲键都发请求不可接受),见 docs/frontend.md「列表页通则」。
         -->
         <a-input-search
           v-model:value="search"

@@ -2,7 +2,7 @@
 //
 // 平台层能力,与业务无关:这里不认识账号、令牌、皮肤,只认识「日志」。
 //
-// 约定(见 docs/02-architecture.md 第五节):
+// 约定(见 docs/architecture.md 第五节):
 // 每个请求上下文都带 request_id,业务日志再叠加 domain 与 account_id,
 // 这样一条请求的所有日志可以用同一个 request_id 串起来。
 package log
@@ -152,7 +152,7 @@ func (r Redacted) LogValue() slog.Value { return slog.StringValue("[REDACTED]") 
 // SensitiveKeys 是默认脱敏的字段名(大小写不敏感)。
 //
 // 命中这些 key 的日志字段会被替换成掩码,防止「不小心」把密码、
-// 令牌、密钥写进日志(docs/09-security.md 6.3)。
+// 令牌、密钥写进日志(docs/security.md 6.3)。
 var SensitiveKeys = []string{
 	"password", "new_password", "old_password", "token", "access_token",
 	"refresh_token", "id_token", "client_secret", "secret", "private_key",

@@ -33,3 +33,11 @@ RETURNING *;
 
 -- name: TouchCredentialChangedAt :exec
 UPDATE identity.credential SET changed_at = now() WHERE account_id = $1 AND algo = $2;
+
+-- name: SetCredentialMustChange :exec
+-- 首登强制改密(P1)的真源开关:引导建号置 true,改密/重置密码置 false。
+-- 不并进 UpsertCredential 是因为「写入新的哈希」和「要求用户改密」是两件
+-- 独立的事:引导流程写完哈希还要再要求改密,合并会逼调用方打擦边球。
+UPDATE identity.credential
+SET must_change = $3
+WHERE account_id = $1 AND algo = $2;

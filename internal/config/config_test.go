@@ -114,7 +114,7 @@ func TestSameSiteNoneRequiresSecure(t *testing.T) {
 	require.Contains(t, err.Error(), "SSO_COOKIE_SECURE=true")
 }
 
-// 密钥与密码绝不能出现在启动日志里(docs/09-security.md 6.3)。
+// 密钥与密码绝不能出现在启动日志里(docs/security.md 6.3)。
 func TestSensitiveValuesAreRedacted(t *testing.T) {
 	baseEnv(t)
 

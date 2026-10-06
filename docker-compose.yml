@@ -42,36 +42,32 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # 整份 .env 直接进容器,不再逐条手工透传。
+    #
+    # 这是 docs/configuration.md §4.1 的核心改动:手工清单必然漂移,
+    # 而且漂移时**没有任何报错** —— 实测 config.Load 读的 80 个变量里,
+    # 只有 17 个能被 .env 控制,其余 63 个改了等于没改。
+    # 同名直达之后,config 里新增一个读取项不需要再改这个文件。
+    #
+    # env_file 指向不存在的文件时 compose 立刻报错,所以文件级缺失仍然是 fail-fast。
+    env_file:
+      - .env
     environment:
+      # 下面这些是**容器内**的值,与宿主机 .env 无关,必须写死在这里:
+      # 放进 env_file 会被同名键覆盖,而覆盖成宿主机的值就错了。
       DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: ${DB_NAME:-yggauth}
-      DB_USER: ${DB_USER:-yggauth}
-      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD 未设置}
-      # 下面这些从 .env 透传。必填项在 .env.example 里标注。
-      APP_PUBLIC_DOMAIN: ${APP_PUBLIC_DOMAIN:?必填}
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?必填}
-      ADMIN_DOMAIN: ${ADMIN_DOMAIN:-}
-      KEY_MASTER_SECRET: ${KEY_MASTER_SECRET:?必填}
+      DB_PORT: "5432"
       DATA_DIR: /data
       MIGRATIONS_DIR: /migrations
-      TZ: ${TZ:-Asia/Shanghai}
-      # 生产必须开 HTTPS 与 Secure cookie。
-      SSO_COOKIE_SECURE: ${SSO_COOKIE_SECURE:-true}
       TRUST_PROXY_HEADERS: "true"
-      # 邮件:不配就退回 console 投递,不会导致启动失败。
-      MAILER_TRANSPORT: ${MAILER_TRANSPORT:-console}
-      MAILER_FROM: ${MAILER_FROM:-noreply@localhost}
-      SMTP_HOST: ${SMTP_HOST:-}
-      SMTP_PORT: ${SMTP_PORT:-587}
-      SMTP_USERNAME: ${SMTP_USERNAME:-}
-      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
-      # Minecraft 域
-      MC_ENABLED: ${MC_ENABLED:-true}
-      MC_SERVER_SHARED_SECRET: ${MC_SERVER_SHARED_SECRET:-}
-      # OIDC
-      SSO_COOKIE_DOMAIN: ${SSO_COOKIE_DOMAIN:-}
-      SSO_COOKIE_SAMESITE: ${SSO_COOKIE_SAMESITE:-Lax}
+      # 必填项保留 fail-fast 写法。注意这两层并不重复:
+      # env_file 只保证「文件在」,而写成 `:?(提示)` 的这一层保证「值非空」——
+      # 用户把必填项留成空值时,只有它能让 compose 在启动前就报错,
+      # 否则要等到连库失败才暴露。**具体键名见 .env.example 的必填标记**。
+      APP_PUBLIC_DOMAIN: ${APP_PUBLIC_DOMAIN:?必填}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?必填}
+      KEY_MASTER_SECRET: ${KEY_MASTER_SECRET:?必填}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD 未设置}
     volumes:
       # 皮肤与头像。命名卷而不是绑定挂载:数据属于这个部署,
       # 不该因为宿主机上某个目录被误删而一起消失。

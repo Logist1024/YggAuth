@@ -40,6 +40,17 @@ export const ErrCode = {
   INVITE_REQUIRED: 20010,
   INVITE_INVALID: 20011,
   SESSION_EXPIRED: 20012,
+  /**
+   * 首登必须改密。**不是 401**:登录态是好的,只是被挡在改密页之前。
+   * 前端拿到它应当跳转改密页;当成「未登录」处理会把用户踢回登录页,
+   * 而重新登录根本解决不了这件事(转一圈又被挡回来)。
+   */
+  PASSWORD_CHANGE_REQUIRED: 20013,
+  /**
+   * 注册入口已关闭(registration.mode=closed)。
+   * **不是**参数错误:请求写得没问题,是站点当前不收新人。
+   */
+  REGISTRATION_CLOSED: 20014,
 
   // ------------------------------------------------------------ 3xxxx 权限
   FORBIDDEN: 30001,
@@ -96,6 +107,8 @@ const TITLES: Readonly<Record<number, string>> = {
   [ErrCode.INVITE_REQUIRED]: '该系统需要邀请码才能注册',
   [ErrCode.INVITE_INVALID]: '邀请码无效或已用尽',
   [ErrCode.SESSION_EXPIRED]: '登录态已过期,请重新登录',
+  [ErrCode.PASSWORD_CHANGE_REQUIRED]: '首次登录必须修改密码',
+  [ErrCode.REGISTRATION_CLOSED]: '注册已关闭',
 
   [ErrCode.FORBIDDEN]: '权限不足',
   [ErrCode.PERMISSION_DENIED]: '需要更高的权限',
@@ -145,6 +158,8 @@ const HINTS: Readonly<Record<number, string>> = {
   [ErrCode.INVITE_REQUIRED]: '请向管理员索取邀请码。',
   [ErrCode.INVITE_INVALID]: '请确认邀请码是否输入正确,或向管理员索取新的邀请码。',
   [ErrCode.SESSION_EXPIRED]: '请重新登录。',
+  [ErrCode.PASSWORD_CHANGE_REQUIRED]: '请按页面提示设置新密码,之后即可正常使用。',
+  [ErrCode.REGISTRATION_CLOSED]: '如需开放注册,请让管理员在后台把注册模式改为开放。',
 
   [ErrCode.FORBIDDEN]: '当前账号没有访问该功能的权限。',
   [ErrCode.PERMISSION_DENIED]: '请让管理员为你的账号授予相应权限。',

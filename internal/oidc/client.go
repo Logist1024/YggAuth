@@ -85,7 +85,7 @@ func (c *Client) GetAudience() fosite.Arguments { return toArgs(c.Audience) }
 //
 // **必须是完整字符串相等**,绝不能用前缀匹配 ——
 // `https://app.example.com/cb.evil.com` 以前缀方式就能通过 `https://app.example.com/cb`,
-// 这类「开放重定向」是 OIDC 实现最常见的漏洞来源(docs/09-security.md 第四节)。
+// 这类「开放重定向」是 OIDC 实现最常见的漏洞来源(docs/security.md 第四节)。
 func (c *Client) ValidateRedirectURI(raw string) error {
 	for _, allowed := range c.RedirectURIs {
 		if raw == allowed {

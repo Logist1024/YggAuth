@@ -1,6 +1,7 @@
 package webserver
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,9 +9,12 @@ import (
 )
 
 // serve 用某个 SPA 的 handler 真跑一次请求。
+//
+// 这里用 context.Background() 而不是 t.Context():serve 是个无状态小工具,
+// 把 *testing.T 传进来只是为了满足 linter,得不偿失。
 func serve(spa *SPA, target string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	spa.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+	spa.handler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil))
 	return rec
 }
 

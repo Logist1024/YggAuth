@@ -50,8 +50,16 @@ type Service struct {
 	fallbackSecret string
 	// hasJoinedWindow 是 server_id 的有效时间窗
 	hasJoinedWindow time.Duration
-	// nameRetentionDays 是改名后旧名保留天数
+	// nameRetentionDays 是改名后旧名保留天数(构造参数,env 种子)
 	nameRetentionDays int
+	// settings 是运行时配置快照:保留天数后台可改,不重启生效。
+	// 为 nil 时退回构造参数(单测不必装配配置表)。
+	settings Settings
+}
+
+// Settings 是运行时配置的读取能力(见 docs/configuration.md §6.1)。
+type Settings interface {
+	Int(ctx context.Context, key string, fallback int) int
 }
 
 // Options 是 Service 的构造参数。
@@ -61,6 +69,8 @@ type Options struct {
 	TokenTTL          time.Duration
 	HasJoinedWindow   time.Duration
 	NameRetentionDays int
+	// Settings 非空时,保留天数每次现读,后台改完立刻生效。
+	Settings Settings
 }
 
 // NewService 创建 MC 域服务。
@@ -84,7 +94,19 @@ func NewService(pool *db.Pool, accounts AccountGateway, clk clock.Clock, opts Op
 		tokenTTL:          opts.TokenTTL,
 		hasJoinedWindow:   opts.HasJoinedWindow,
 		nameRetentionDays: opts.NameRetentionDays,
+		settings:          opts.Settings,
 	}
+}
+
+// retentionDays 返回当前生效的旧名保留天数。
+//
+// 现读而不是用构造参数:这个值登记在后台设置里,管理员把保留期从 90 天
+// 调到 30 天后,改名流程还按 90 天拒人,就是又一次「改了没用」。
+func (s *Service) retentionDays(ctx context.Context) int {
+	if s.settings == nil {
+		return s.nameRetentionDays
+	}
+	return s.settings.Int(ctx, "mc.name_retention_days", s.nameRetentionDays)
 }
 
 // Profile 是玩家档案。
@@ -444,7 +466,7 @@ func (s *Service) Rename(ctx context.Context, profileID uuid.UUID, newName strin
 		return Profile{}, err
 	}
 
-	reusableAt := s.clock.Now().AddDate(0, 0, s.nameRetentionDays)
+	reusableAt := s.clock.Now().AddDate(0, 0, s.retentionDays(ctx))
 	if _, err := s.queries.InsertNameHistory(ctx, query.InsertNameHistoryParams{
 		ProfileID:  profileID,
 		Name:       profile.CurrentName,

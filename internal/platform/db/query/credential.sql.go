@@ -12,7 +12,7 @@ import (
 )
 
 const getCredential = `-- name: GetCredential :one
-SELECT id, account_id, algo, hash, params, failed_attempts, locked_until, changed_at FROM identity.credential WHERE account_id = $1 AND algo = $2
+SELECT id, account_id, algo, hash, params, failed_attempts, locked_until, changed_at, must_change FROM identity.credential WHERE account_id = $1 AND algo = $2
 `
 
 type GetCredentialParams struct {
@@ -32,6 +32,7 @@ func (q *Queries) GetCredential(ctx context.Context, arg GetCredentialParams) (I
 		&i.FailedAttempts,
 		&i.LockedUntil,
 		&i.ChangedAt,
+		&i.MustChange,
 	)
 	return i, err
 }
@@ -44,7 +45,7 @@ SET failed_attempts = failed_attempts + 1,
         ELSE locked_until
     END
 WHERE account_id = $3 AND algo = $4
-RETURNING id, account_id, algo, hash, params, failed_attempts, locked_until, changed_at
+RETURNING id, account_id, algo, hash, params, failed_attempts, locked_until, changed_at, must_change
 `
 
 type RecordFailedAttemptParams struct {
@@ -72,6 +73,7 @@ func (q *Queries) RecordFailedAttempt(ctx context.Context, arg RecordFailedAttem
 		&i.FailedAttempts,
 		&i.LockedUntil,
 		&i.ChangedAt,
+		&i.MustChange,
 	)
 	return i, err
 }
@@ -80,7 +82,7 @@ const resetFailedAttempts = `-- name: ResetFailedAttempts :one
 UPDATE identity.credential
 SET failed_attempts = 0, locked_until = NULL
 WHERE account_id = $1 AND algo = $2
-RETURNING id, account_id, algo, hash, params, failed_attempts, locked_until, changed_at
+RETURNING id, account_id, algo, hash, params, failed_attempts, locked_until, changed_at, must_change
 `
 
 type ResetFailedAttemptsParams struct {
@@ -101,8 +103,29 @@ func (q *Queries) ResetFailedAttempts(ctx context.Context, arg ResetFailedAttemp
 		&i.FailedAttempts,
 		&i.LockedUntil,
 		&i.ChangedAt,
+		&i.MustChange,
 	)
 	return i, err
+}
+
+const setCredentialMustChange = `-- name: SetCredentialMustChange :exec
+UPDATE identity.credential
+SET must_change = $3
+WHERE account_id = $1 AND algo = $2
+`
+
+type SetCredentialMustChangeParams struct {
+	AccountID  uuid.UUID `json:"account_id"`
+	Algo       string    `json:"algo"`
+	MustChange bool      `json:"must_change"`
+}
+
+// 首登强制改密(P1)的真源开关:引导建号置 true,改密/重置密码置 false。
+// 不并进 UpsertCredential 是因为「写入新的哈希」和「要求用户改密」是两件
+// 独立的事:引导流程写完哈希还要再要求改密,合并会逼调用方打擦边球。
+func (q *Queries) SetCredentialMustChange(ctx context.Context, arg SetCredentialMustChangeParams) error {
+	_, err := q.db.Exec(ctx, setCredentialMustChange, arg.AccountID, arg.Algo, arg.MustChange)
+	return err
 }
 
 const touchCredentialChangedAt = `-- name: TouchCredentialChangedAt :exec
@@ -128,7 +151,7 @@ SET hash = EXCLUDED.hash,
     failed_attempts = 0,
     locked_until = NULL,
     changed_at = now()
-RETURNING id, account_id, algo, hash, params, failed_attempts, locked_until, changed_at
+RETURNING id, account_id, algo, hash, params, failed_attempts, locked_until, changed_at, must_change
 `
 
 type UpsertCredentialParams struct {
@@ -156,6 +179,7 @@ func (q *Queries) UpsertCredential(ctx context.Context, arg UpsertCredentialPara
 		&i.FailedAttempts,
 		&i.LockedUntil,
 		&i.ChangedAt,
+		&i.MustChange,
 	)
 	return i, err
 }

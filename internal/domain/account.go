@@ -85,6 +85,12 @@ type Session struct {
 	RevokedAt     *time.Time
 	IP            string
 	UserAgent     string
+	// MustChangePassword 表示本次会话必须先改密码才能继续。
+	//
+	// 它是凭据上 must_change(真源)在**登录这一刻**的投影:认证中间件
+	// 每个请求都要判断这件事,而会话行本来就是必读的,凭据行不是。
+	// 改密码会吊销该账号全部会话,所以这份投影不会在旗标清零后残留。
+	MustChangePassword bool
 }
 
 // Active 判断会话在给定时刻是否仍然有效。
@@ -167,6 +173,10 @@ type Principal struct {
 	SessionID uuid.UUID
 	// Permissions 是该主体当前持有的全部权限点(含通配形式)。
 	Permissions []string
+	// MustChangePassword 是会话行上「首登强制改密」的投影(真源在凭据行,
+	// 见迁移 00008)。放进 Principal 是为了:中间件本来就读到了会话行,
+	// 顺手带出来,任意 handler 就能把它告诉前端,而不必再查一次凭据。
+	MustChangePassword bool
 }
 
 // Can 判断主体是否具备目标权限点。

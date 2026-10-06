@@ -16,7 +16,7 @@ import (
 	"strings"
 )
 
-// Token 熵要求:32 字节是会话令牌的最低标准(docs/09-security.md 3.2)。
+// Token 熵要求:32 字节是会话令牌的最低标准(docs/security.md 3.2)。
 const (
 	// TokenBytes 是通用令牌字节数。
 	TokenBytes = 32
@@ -68,7 +68,7 @@ func Hex(nBytes int) (string, error) {
 // UUIDToken 返回 UUID 外形的随机串:32 位小写 hex、无横线。
 //
 // MC 协议的 accessToken **必须**是这个格式 —— MC 服务端会直接解析它
-// (docs/06-mc-protocol.md 2.1 约束)。
+// (docs/minecraft.md 2.1 约束)。
 func UUIDToken() (string, error) { return Hex(UUIDTokenBytes) }
 
 // userCodeAlphabet 排除易混淆字符(0/O、1/I/L),用户手输的码要能一眼看对。

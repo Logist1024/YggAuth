@@ -3,7 +3,7 @@
 // 平台层能力,与业务无关 —— 它只管「密钥」,不关心谁在用它签名。
 //
 // 私钥用 AES-256-GCM 加密后入库:数据库泄露时,攻击者拿到的密文
-// 无法直接使用,还需要 KEY_MASTER_SECRET(docs/09-security.md 6.1)。
+// 无法直接使用,还需要 KEY_MASTER_SECRET(docs/security.md 6.1)。
 package keys
 
 import (
@@ -178,7 +178,7 @@ func (m *Manager) Rotate(ctx context.Context) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
-	enc, err := m.Encrypt(privPEM)
+	enc, err := m.Seal(privPEM)
 	if err != nil {
 		return Record{}, err
 	}
@@ -199,7 +199,7 @@ func (m *Manager) Rotate(ctx context.Context) (Record, error) {
 
 // Decrypt 解出私钥。
 func (m *Manager) Decrypt(enc []byte) (*rsa.PrivateKey, error) {
-	plain, err := m.aead().Open(nil, nonceOf(enc), payloadOf(enc), nil)
+	plain, err := m.Unseal(enc)
 	if err != nil {
 		// 常见原因:KEY_MASTER_SECRET 改过。报明确错误而不是通用 500,
 		// 否则排查时会以为是数据库问题。
@@ -222,14 +222,30 @@ func (m *Manager) Decrypt(enc []byte) (*rsa.PrivateKey, error) {
 	return rsaKey, nil
 }
 
-// Encrypt 用主密钥加密数据。
-func (m *Manager) Encrypt(plain []byte) ([]byte, error) {
+// Seal 用主密钥加密任意数据(AES-256-GCM,nonce 前置)。
+//
+// 签名私钥与配置表里的敏感值共用这一个入口:同一把 KEY_MASTER_SECRET、
+// 同一段实现,少一处就少一种「这个是加密的吗」的疑惑。
+func (m *Manager) Seal(plain []byte) ([]byte, error) {
 	aead := m.aead()
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, apperr.Newf(apperr.CodeInternal, "生成随机数失败: %v", err)
 	}
 	return aead.Seal(nonce, nonce, plain, nil), nil
+}
+
+// Unseal 解开 Seal 的产物。
+//
+// 解不开最常见的原因是 KEY_MASTER_SECRET 与入库时不一致 ——
+// 错误信息必须把这句写上,否则排查方向会跑偏到数据库去。
+func (m *Manager) Unseal(enc []byte) ([]byte, error) {
+	plain, err := m.aead().Open(nil, nonceOf(enc), payloadOf(enc), nil)
+	if err != nil {
+		return nil, apperr.New(apperr.CodeInternal,
+			"解密失败,通常是 KEY_MASTER_SECRET 与入库时不一致")
+	}
+	return plain, nil
 }
 
 func (m *Manager) aead() cipher.AEAD {

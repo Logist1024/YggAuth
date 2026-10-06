@@ -170,7 +170,7 @@ CREATE TABLE minecraft.avatar (
 -- ---------------------------------------------------------------- 外部皮肤站绑定
 
 -- MC_SKIN_EXTERNAL=true 时的回源目标。只允许后台配置,不是用户输入,
--- 防 SSRF(见 docs/09-security.md 第七节)。
+-- 防 SSRF(见 docs/security.md 第七节)。
 CREATE TABLE minecraft.external_binding (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     profile_id  UUID NOT NULL UNIQUE REFERENCES minecraft.profile(id) ON DELETE CASCADE,

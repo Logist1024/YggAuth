@@ -11,8 +11,8 @@ BIN_DIR := bin
 BINARY  := $(BIN_DIR)/yggauth
 PKG     := ./...
 
-# 前端产物目录,go:embed 从这里读
-WEB_DIST := web/dist
+# 前端产物由 vite 直接输出到 internal/webserver/dist,再由 //go:embed all:dist 打进二进制。
+# 该目录是入库文件(漏掉它,新克隆的仓库 go build 会失败),所以不参与 clean。
 
 .PHONY: help
 help: ## 显示所有可用目标
@@ -59,20 +59,22 @@ verify: fmt lint test ## 提交前完整校验:格式化 + lint + 单测
 ## ---------------------------------------------------------------- 运行时
 
 .PHONY: dev
-dev: ## 本地开发运行(自动执行迁移)
-	$(GO) run ./cmd/yggauth serve --migrate
+dev: ## 本地开发运行(迁移由 DB_AUTO_MIGRATE 控制,默认开,启动即执行)
+	$(GO) run ./cmd/yggauth serve
 
+# 迁移不用外部 goose CLI —— 二进制自带 migrate 子命令,迁移文件已 go:embed 进去,
+# 读的配置与 serve 完全同一份(.env 由调用方 source),少一个隐藏的工具依赖。
 .PHONY: migrate
-migrate: ## 执行数据库迁移(goose up)
-	goose -dir db/migrations postgres "$(DB_URL)" up
+migrate: ## 执行数据库迁移(等价于 yggauth migrate,默认 up)
+	$(GO) run ./cmd/yggauth migrate
 
 .PHONY: migrate-down
 migrate-down: ## 回滚一次迁移
-	goose -dir db/migrations postgres "$(DB_URL)" down
+	$(GO) run ./cmd/yggauth migrate -to down
 
 .PHONY: migrate-status
 migrate-status: ## 查看迁移状态
-	goose -dir db/migrations postgres "$(DB_URL)" status
+	$(GO) run ./cmd/yggauth migrate -to status
 
 .PHONY: sqlc
 sqlc: ## 根据 db/queries 生成类型安全的 Go 代码
@@ -110,6 +112,10 @@ vuln: ## Go 依赖漏洞扫描
 check-terms: ## 术语门禁(ADR-010):内核与平台层不得出现业务词
 	@bash scripts/check-terms.sh
 
+.PHONY: golden-path
+golden-path: ## 黄金路径验收(docs/configuration.md 8);真容器 1/2/7 步需要 Docker
+	@bash deploy/test/golden-path.sh
+
 .PHONY: clean
-clean: ## 清理构建产物
-	rm -rf $(BIN_DIR) $(WEB_DIST)
+clean: ## 清理构建产物(只清二进制;前端 embed 产物必须保留)
+	rm -rf $(BIN_DIR)

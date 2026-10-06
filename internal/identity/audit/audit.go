@@ -1,6 +1,6 @@
 // Package audit 记录与检索审计事件。
 //
-// 审计表只追加:本包不提供任何删除接口(docs/09-security.md 9.2)。
+// 审计表只追加:本包不提供任何删除接口(docs/security.md 9.2)。
 // 写失败不阻断业务 —— 可靠性优先于完整性,但两者都要尽力。
 package audit
 

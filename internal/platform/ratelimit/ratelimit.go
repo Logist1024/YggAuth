@@ -1,7 +1,7 @@
 // Package ratelimit 提供进程内限流。
 //
 // 平台层能力,与业务无关。认证接口的限流是安全措施而不是性能措施
-// (docs/09-security.md 2.3),所以实现刻意保守:宁可少放过,
+// (docs/security.md 2.3),所以实现刻意保守:宁可少放过,
 // 也不要在攻击流量下把验证逻辑打穿。
 //
 // 选型说明:用的是**进程内**计数。多实例部署时每个实例各限各的,
@@ -136,7 +136,7 @@ func (l *Limiter) evictLocked(now time.Time) {
 
 // Scope 是一组限流规则。
 //
-// 阈值全部取自 docs/05-api.md 第七节。
+// 阈值全部取自 docs/api.md 第七节。
 type Scope struct {
 	// Limit 是窗口内允许的次数
 	Limit int

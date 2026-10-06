@@ -77,6 +77,14 @@ export const useSessionStore = defineStore('session', () => {
   /** 后端下发的校验规则;拉取失败时用兜底值。 */
   const policy = ref<AccountPolicy>({ ...FALLBACK_POLICY })
   const notice = ref<Notice | null>(null)
+  /**
+   * 会话要求先改密码(首登强制改密,后端 20013)。
+   *
+   * 真源在后端的凭据行,这里只是它的副本:登录后由 /api/account/ 带回,
+   * 页面刷新也靠它恢复 —— 只认登录响应里那个字段的话,刷新一次就没了,
+   * 而后端照样每个请求都拦,用户看到的就是「点什么都是红错」。
+   */
+  const mustChangePassword = ref(false)
 
   const api = new ApiClient({
     // 401 时先给一次恢复机会。账号站的会话是 HttpOnly cookie,
@@ -115,13 +123,15 @@ export const useSessionStore = defineStore('session', () => {
   async function loadAccount(): Promise<SessionAccount | null> {
     loading.value = true
     try {
-      const data = await api.get<{ account: RawSessionAccount }>('/api/account/')
+      const data = await api.get<{ account: RawSessionAccount; must_change_password?: boolean }>('/api/account/')
       const normalized = normalizeAccount(data.account)
       account.value = normalized
+      mustChangePassword.value = data.must_change_password === true
       return normalized
     } catch (err) {
       if (err instanceof ApiError && err.requiresLogin) {
         account.value = null
+        mustChangePassword.value = false
         return null
       }
       throw err
@@ -132,6 +142,11 @@ export const useSessionStore = defineStore('session', () => {
 
   function setAccount(next: SessionAccount | null): void {
     account.value = next
+    // 登出与「改密码后被动登出」都走这条:旗标跟着会话一起清,
+    // 否则改完密码再登录,会因为一个早就不该存在的旗标被送回改密页。
+    if (next === null) {
+      mustChangePassword.value = false
+    }
   }
 
   /** 记一条跨页提示;登录页展示后调 clearNotice 清掉。 */
@@ -151,6 +166,7 @@ export const useSessionStore = defineStore('session', () => {
       // 留着「看起来还登录着」的状态比登出失败更糟 ——
       // 用户会以为还在登录,其实每个请求都在 401。
       account.value = null
+      mustChangePassword.value = false
       // 主动退出不需要解释,也不该把早先那句「已过期」带过去。
       notice.value = null
     }
@@ -162,6 +178,7 @@ export const useSessionStore = defineStore('session', () => {
     loading,
     policy,
     notice,
+    mustChangePassword,
     api,
     theme,
     isAuthenticated,

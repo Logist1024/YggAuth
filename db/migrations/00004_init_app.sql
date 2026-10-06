@@ -1,7 +1,7 @@
 -- M1 基线迁移:app schema
 --
 -- 运行时可改的应用配置。优先级高于环境变量,便于后台调整而无需重启
--- (见 docs/08-deployment.md 5.3)。
+-- (见 docs/deployment.md 5.3)。
 
 -- +goose Up
 -- +goose StatementBegin

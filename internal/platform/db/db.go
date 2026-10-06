@@ -60,7 +60,7 @@ func (c Config) buildDSN() string {
 
 // Open 建立连接池并做一次连通性自检。
 //
-// 连接池的 MaxConns 默认按 CPU 核数 × 4 推断(见 docs/02-architecture.md 第六节),
+// 连接池的 MaxConns 默认按 CPU 核数 × 4 推断(见 docs/architecture.md 第六节),
 // 生产环境建议显式配置,避免容器 CPU limit 与宿主机核数不一致时估偏。
 func Open(ctx context.Context, cfg Config, logger *slog.Logger) (*Pool, error) {
 	// 未显式配置时补一个默认超时。否则 context.WithTimeout(ctx, 0)

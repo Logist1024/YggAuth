@@ -25,6 +25,8 @@ type Credential struct {
 	FailedAttempts int
 	LockedUntil    *time.Time
 	ChangedAt      time.Time
+	// MustChange 是首登强制改密的真源开关,由引导流程置位、改密时清零。
+	MustChange bool
 }
 
 // Locked 判断凭据当前是否处于锁定状态。
@@ -49,6 +51,9 @@ type Repository interface {
 
 	UpsertCredential(ctx context.Context, accountID uuid.UUID, algo Algo, hash string) (Credential, error)
 	GetCredential(ctx context.Context, accountID uuid.UUID, algo Algo) (Credential, error)
+	// SetMustChange 切换「下次登录必须改密」旗标(真源,见迁移 00008)。
+	// 引导建号置 true,改密/重置密码置 false。
+	SetMustChange(ctx context.Context, accountID uuid.UUID, algo Algo, mustChange bool) error
 	RecordFailedAttempt(ctx context.Context, accountID uuid.UUID, algo Algo, lock bool, lockFor time.Duration) (Credential, error)
 	ResetFailedAttempts(ctx context.Context, accountID uuid.UUID, algo Algo) error
 }
@@ -110,6 +115,7 @@ func toCredential(row query.IdentityCredential) Credential {
 		Hash:           row.Hash,
 		FailedAttempts: int(row.FailedAttempts),
 		ChangedAt:      row.ChangedAt,
+		MustChange:     row.MustChange,
 	}
 	if row.LockedUntil.Valid {
 		t := row.LockedUntil.Time
@@ -274,6 +280,18 @@ func (r *PgRepository) GetCredential(ctx context.Context, accountID uuid.UUID, a
 		return Credential{}, translate(err)
 	}
 	return toCredential(row), nil
+}
+
+// SetMustChange 切换首登强制改密旗标。
+func (r *PgRepository) SetMustChange(ctx context.Context, accountID uuid.UUID, algo Algo, mustChange bool) error {
+	if err := r.queries.SetCredentialMustChange(ctx, query.SetCredentialMustChangeParams{
+		AccountID:  accountID,
+		Algo:       string(algo),
+		MustChange: mustChange,
+	}); err != nil {
+		return translate(err)
+	}
+	return nil
 }
 
 // RecordFailedAttempt 记录一次登录失败,达到阈值时同时锁定。

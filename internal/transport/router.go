@@ -21,12 +21,17 @@ import (
 // Deps 是路由装配所需的依赖。
 //
 // 业务域在后续里程碑注入,字段保持显式,避免用容器隐式装配
-// (docs/02-architecture.md 第二节)。
+// (docs/architecture.md 第二节)。
 type Deps struct {
 	Config *config.Config
 	Logger Logger
 	DB     *db.Pool
 	Clock  Clock
+
+	// Settings 是运行时配置快照,供公开配置端点
+	// (/api/public/config,见 docs/configuration.md §7.2)读站点名、
+	// 注册模式等展示规则。为 nil 时该端点退化到 env 值,不报错。
+	Settings *config.Snapshot
 
 	// 以下字段由各业务域在对应里程碑填充。
 	Identity IdentityDeps
@@ -94,6 +99,11 @@ func (rt *Router) Handler() http.Handler {
 
 	rt.health.Mount(r)
 	r.Handle("GET /metrics", metrics.Handler())
+
+	// 公开配置:无需登录、无需 CSRF(安全方法 GET 不参与 CSRF 校验)。
+	// 站点名、注册模式这些**展示规则**只有一份真源,前端不抄
+	// (与 /api/auth/policy 同一原则)。
+	r.Get("/api/public/config", rt.publicConfig)
 
 	// 业务路由按里程碑逐个挂载:
 	//   M2 → /api/auth/*、/api/account/*

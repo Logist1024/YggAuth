@@ -11,6 +11,8 @@
  */
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
+import { loadPublicConfig, publicConfig } from '@yggauth/shared'
+
 import { useAdminStore } from './stores/admin'
 
 declare module 'vue-router' {
@@ -94,6 +96,14 @@ const routes: RouteRecordRaw[] = [
         component: () => import('./views/SettingsView.vue'),
         meta: { permission: 'setting:read', title: '应用配置' },
       },
+      // 首登强制改密的目标页。**不带 permission** —— 它是给每一个
+      // 被要求改密的人的,而那会儿权限与菜单都还没拉(去拉也会被挡)。
+      {
+        path: 'password/change',
+        name: 'password-change',
+        component: () => import('./views/ChangePasswordView.vue'),
+        meta: { title: '修改密码' },
+      },
     ],
   },
   {
@@ -124,10 +134,14 @@ export const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
+  // 站点名称是后台可改的设置:首次导航拉一次公开配置(之后命中缓存)。
+  await loadPublicConfig()
+
   // 先设标签页标题:下面有提前 return(未登录跳转),
   // 放在末尾会让登录页停在 index.html 的默认标题。
+  // 站点名来自**设置**而不是写死的字符串 —— 否则「站点名称」这项设置对 <title> 无效。
   if (to.meta.title) {
-    document.title = `${to.meta.title} · YggAuth 管理后台`
+    document.title = `${to.meta.title} · ${publicConfig().site_name} 管理后台`
   }
 
   // 登录页本身不需要会话。
@@ -141,6 +155,15 @@ router.beforeEach(async (to) => {
   }
   if (!store.account) {
     return { name: 'login', query: { redirect: to.fullPath } }
+  }
+
+  // 首登强制改密:旗标置位时,除改密页本身外一律送去改密页。
+  //
+  // 必须排在权限判断之前:改密期间 permissions 是空的,不先拦这一下,
+  // 管理员会先收到一句「你没有查看 XX 的权限」,而真正的原因是
+  // 他还没改密码。
+  if (store.mustChangePassword && to.name !== 'password-change') {
+    return { name: 'password-change', query: { redirect: to.fullPath } }
   }
 
   const required = to.meta.permission

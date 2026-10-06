@@ -2,7 +2,7 @@
 //
 // 它是账号内核的**门面**:账号、角色权限、审计这些能力都由 identity 提供,
 // 这里只做参数解析、权限点校验与响应组装,不重复实现业务规则
-// (docs/02-architecture.md 第二节)。
+// (docs/architecture.md 第二节)。
 package admin
 
 import (
@@ -32,6 +32,7 @@ import (
 	"github.com/yggauth/yggauth/internal/platform/db/query"
 	"github.com/yggauth/yggauth/internal/platform/httpx"
 	"github.com/yggauth/yggauth/internal/platform/keys"
+	"github.com/yggauth/yggauth/internal/platform/mailer"
 )
 
 // 权限点常量。
@@ -57,10 +58,22 @@ const (
 	PermServerWrite     = "minecraft:server:write"
 )
 
+// MailReloader 是发件器的热替换入口(docs/configuration.md §7.3)。
+//
+// 后台只管「配置变了,重建一下」;怎么从设置现值构造发件器由装配处负责。
+type MailReloader interface {
+	Reload(cfg mailer.Config) error
+}
+
 // Deps 是后台接口的依赖。
 type Deps struct {
 	Identity *identity.Service
-	Settings *config.SettingStore
+	// Settings 是运行时配置快照(带登记表校验与敏感值掩码),
+	// 不是裸的 SettingStore —— 裸库表接受任意键任意值。
+	Settings *config.Snapshot
+	// Mailer 让 `mail.*` 的修改**立刻**生效:只落库不重建的话,
+	// 页面显示「保存成功」而发信仍旧按老配置走。
+	Mailer MailReloader
 	// OIDC 是可选依赖:未装配授权服务时后台的客户端页返回 501
 	OIDC *oidc.ClientService
 	// OIDCKeys 用于密钥轮换
@@ -118,6 +131,9 @@ func (h *Handler) Mount(r chi.Router) {
 		r.With(httpx.RequirePermission(PermOIDCClientRead)).Get("/signing-keys", h.ListSigningKeys)
 		r.With(httpx.RequirePermission(PermOIDCClientWrite)).Post("/signing-keys/rotate", h.RotateSigningKey)
 		r.With(httpx.RequirePermission(PermSettingWrite)).Patch("/settings", h.UpdateSetting)
+		// 发测试信用的是**已保存的生效配置**:先保存再测,
+		// 否则会出现「测的是草稿、生效的是另一套」这种最费时间的组合。
+		r.With(httpx.RequirePermission(PermSettingWrite)).Post("/settings/mail/test", h.TestMail)
 
 		// Minecraft 侧的后台只读列表。菜单里早就有这两项
 		// (见 allMenus),此前没挂路由 —— 点进去只能看到占位页。
@@ -880,7 +896,11 @@ func (h *Handler) RevokeInvitation(w http.ResponseWriter, r *http.Request) {
 
 // ---------------------------------------------------------------- 设置
 
-// GetSettings 返回应用配置。
+// GetSettings 返回应用配置与键定义(schema)。
+//
+// schema 一并下发是刻意的:前端 `SettingsView.vue` 原先手抄了一张 META 表,
+// 后端加一个键前端不改就显示不出来。规则只有一份真源(登记表),
+// 前端只负责渲染。
 func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 	if h.deps.Settings == nil {
 		httpx.Fail(w, apperr.New(apperr.CodeUnavailable, "配置存储未装配"))
@@ -896,7 +916,7 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 	for _, s := range list {
 		values[s.Key] = s.Value
 	}
-	httpx.OK(w, map[string]any{"settings": values})
+	httpx.OK(w, map[string]any{"settings": values, "schema": config.Schema()})
 }
 
 type updateSettingsRequest map[string]json.RawMessage
@@ -913,10 +933,32 @@ func (h *Handler) UpdateSetting(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, err)
 		return
 	}
+	if len(req) == 0 {
+		httpx.Fail(w, apperr.New(apperr.CodeInvalidArgument, "没有要修改的配置").
+			WithMessage("没有要修改的配置"))
+		return
+	}
+	// 先整体校验再写:边写边校验会留下「改了一半」的配置。
+	//
+	// 校验说明**原样对外**:admin 是知道这条规则的人,只回一句
+	// 「参数校验失败」等于让他去猜是哪个键、为什么不行 ——
+	// 而注册码 20007 那类对普通用户的兜底文案,对后台并不适用。
+	if err := h.deps.Settings.ValidateUpdate(r.Context(), req); err != nil {
+		httpx.Fail(w, apperr.New(apperr.CodeInvalidArgument, err.Error()).WithMessage(err.Error()))
+		return
+	}
 
 	actor := httpx.PrincipalFrom(r.Context())
 	updated := make(map[string]json.RawMessage, len(req))
 	for key, value := range req {
+		// 回显掩码 = 「原样保留」:不写库、不审计 ——
+		// 否则每次改别的键都会顺手把 SMTP 密码刷成一串星号。
+		// 响应回显掩码本身:值没变,也不用把密文发给浏览器。
+		if spec, ok := config.Lookup(key); ok && spec.IsSecret() && string(value) == secretJSON(config.MaskValue) {
+			updated[key] = value
+			continue
+		}
+
 		s, err := h.deps.Settings.Upsert(r.Context(), key, value, &actor.AccountID)
 		if err != nil {
 			httpx.Fail(w, err)
@@ -924,10 +966,119 @@ func (h *Handler) UpdateSetting(w http.ResponseWriter, r *http.Request) {
 		}
 		updated[s.Key] = s.Value
 		h.auditAdmin(r, actor.AccountID, "setting.updated", "setting", key,
-			map[string]any{"value": string(value)})
+			// 敏感键在这里被换成掩码:审计表会被导出、会被后台展示,
+			// 明文进去了就等于多了一条泄露路径。
+			map[string]any{"value": config.AuditValue(key, value)})
+	}
+
+	// mail.* 里影响发件器的键变了 → 就地重建。
+	//
+	// 只落库不重建 = 「保存成功」但发信还是老配置,
+	// 又一次「改了没用」,而且这次连个报错都没有。
+	if err := h.reloadMailer(r, req); err != nil {
+		httpx.Fail(w, err)
+		return
 	}
 
 	httpx.OK(w, map[string]any{"settings": updated})
+}
+
+// reloadMailer 在本轮改动涉及发件器时用**设置里的现值**重建发件器。
+//
+// 顺序是「先校验、再落库、最后重建」:校验(ValidateUpdate)把明显的坏值
+// 挡在写入之前,所以重建这一步理论上不会失败;真失败了就保留旧配置
+// 并把话说明白 —— 发信至少还在按老配置工作。
+func (h *Handler) reloadMailer(r *http.Request, req map[string]json.RawMessage) error {
+	affects := false
+	for key := range req {
+		if spec, ok := config.Lookup(key); ok && spec.AffectsSender {
+			affects = true
+			break
+		}
+	}
+	if !affects {
+		return nil
+	}
+	if h.deps.Mailer == nil {
+		return apperr.New(apperr.CodeUnavailable, "发件器未装配,邮件设置无法立即生效")
+	}
+
+	cfg, err := h.deps.Settings.MailerConfig(r.Context())
+	if err != nil {
+		// 解不开 mail.password 这类错误必须报出来:
+		// 悄悄按空密码发信,只会得到一句「认证失败」。
+		return apperr.New(apperr.CodeInvalidArgument, err.Error()).
+			WithMessage("读取邮件配置失败:SMTP 密码解不开(检查主密钥是否换过)")
+	}
+	if err := h.deps.Mailer.Reload(cfg); err != nil {
+		if h.logger != nil {
+			h.logger.Error("mail: 重建发件器失败,已保留原配置", "error", err)
+		}
+		return apperr.New(apperr.CodeInternal, err.Error()).
+			WithMessage("邮件设置已保存,但按新配置重建发件器失败:已保留原配置继续发信")
+	}
+	return nil
+}
+
+// TestMail 用**已保存的生效配置**发一封测试信(docs/configuration.md §7.4)。
+//
+// 没有它,「配了发件邮箱但不知道对不对」的唯一验证方式是等下一个注册用户 ——
+// 错误精确到阶段(connect / tls / auth / send),管理员才知道该改什么:
+// auth 是账号密码,tls 多半是端口(465 要勾隐式 TLS),connect 是地址。
+func (h *Handler) TestMail(w http.ResponseWriter, r *http.Request) {
+	if h.deps.Settings == nil {
+		httpx.Fail(w, apperr.New(apperr.CodeUnavailable, "配置存储未装配"))
+		return
+	}
+
+	var req struct {
+		To string `json:"to"`
+	}
+	if err := httpx.DecodeJSON(w, r, &req); err != nil {
+		httpx.Fail(w, err)
+		return
+	}
+	req.To = strings.TrimSpace(req.To)
+	if req.To == "" || !strings.Contains(req.To, "@") {
+		httpx.Fail(w, apperr.New(apperr.CodeInvalidArgument, "收件邮箱不合法: "+req.To).
+			WithMessage("收件邮箱不合法"))
+		return
+	}
+
+	cfg, err := h.deps.Settings.MailerConfig(r.Context())
+	if err != nil {
+		if h.logger != nil {
+			h.logger.Error("mail: 读取邮件配置失败", "error", err)
+		}
+		// 细节只进日志:这里多半是 mail.password 解不开(主密钥换过),
+		// 对外说清「读不出来」即可,别把内部结构带出去。
+		httpx.Fail(w, apperr.New(apperr.CodeUnavailable, err.Error()).
+			WithMessage("读取邮件配置失败:SMTP 密码解不开(检查主密钥是否换过)"))
+		return
+	}
+
+	// 网络操作给独立超时:管理员点了「发送」却卡在浏览器上,
+	// 比明确告诉他失败更糟。
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	res := mailer.SendTest(ctx, cfg, req.To)
+
+	actor := httpx.PrincipalFrom(r.Context())
+	h.auditAdmin(r, actor.AccountID, "mail.test", "setting", "mail", map[string]any{
+		"to":    req.To,
+		"ok":    res.OK,
+		"stage": string(res.Stage),
+	})
+	httpx.OK(w, res)
+}
+
+// secretJSON 把字符串包成 JSON 字面量。
+func secretJSON(v string) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return `""`
+	}
+	return string(b)
 }
 
 // ---------------------------------------------------------------- 辅助

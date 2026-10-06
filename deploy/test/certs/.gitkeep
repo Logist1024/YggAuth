@@ -7,4 +7,4 @@
 #
 # 实际证书不放进仓库:
 #   fullchain.pem / privkey.pem 命中 .gitignore 的 `*.pem` 规则。
-# 生成方法见 docs/10-test-deployment.md 第 4.1 节。
+# 生成方法见 docs/deployment.md「测试环境」章节。

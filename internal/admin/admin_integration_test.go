@@ -13,6 +13,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/yggauth/yggauth/internal/admin"
 	"github.com/yggauth/yggauth/internal/config"
 	"github.com/yggauth/yggauth/internal/identity"
@@ -27,7 +29,6 @@ import (
 	"github.com/yggauth/yggauth/internal/platform/db/testdb"
 	"github.com/yggauth/yggauth/internal/platform/keys"
 	"github.com/yggauth/yggauth/internal/transport"
-	"golang.org/x/crypto/bcrypt"
 )
 
 type nopLogger struct{}
@@ -44,6 +45,11 @@ type env struct {
 	// pool 供测试直接写库造数据 —— MC 档案/材质这类由协议流程维护的表,
 	// 走一遍登录链路太绕,要测的是后台的查询本身。
 	pool *db.Pool
+	// settings 是运行时配置快照,用于断言热更新后的读取结果。
+	settings *config.Snapshot
+	// mailer 是发件器热替换的桩,记录每一次重建与收到的配置 ——
+	// 「改 mail.* 立刻生效」没有它就只剩一行日志可测。
+	mailer *recordingMailer
 }
 
 func newEnv(t *testing.T) *env {
@@ -59,6 +65,16 @@ func newEnv(t *testing.T) *env {
 	}, keys.NewPGStore(pool))
 	require.NoError(t, err)
 	clientSvc := oidc.NewClientService(pool, oidc.NewSecretHasher(testSecretHasher))
+
+	// 运行时配置快照:后台改设置的用例要走**和生产同一套**路径
+	// (登记表校验 + 敏感值加密),否则测到的是另一套代码。
+	settings := config.NewSnapshot(config.SettingsOptions{
+		Store:  config.NewSettingStore(pool),
+		Sealer: testKeys,
+	})
+
+	// 发件器热替换的桩:见 settings_integration_test.go 里的 recordingMailer
+	mailerStub := &recordingMailer{}
 
 	svc := identity.New(identity.Deps{
 		Accounts: account.NewPgRepository(pool),
@@ -81,16 +97,18 @@ func newEnv(t *testing.T) *env {
 			LockDuration:        15 * time.Minute,
 			EmailTokenTTL:       24 * time.Hour,
 			RegistrationMode:    "open",
+			Settings:            settings,
 		},
-		Session: session.Config{IdleTTL: 168 * time.Hour, MaxTTL: 720 * time.Hour},
+		Session: session.Config{IdleTTL: 168 * time.Hour, MaxTTL: 720 * time.Hour, Settings: settings},
 		Logger:  nopLogger{},
 	})
 
 	handler := transport.New(transport.Deps{
-		Config: &config.Config{},
-		Logger: nopLogger{},
-		DB:     pool,
-		Clock:  clk,
+		Config:   &config.Config{},
+		Logger:   nopLogger{},
+		DB:       pool,
+		Clock:    clk,
+		Settings: settings,
 		Identity: transport.IdentityDeps{Service: svc, Handler: identity.NewHandler(svc,
 			identity.CookieConfig{Name: "ygg_session", SameSite: http.SameSiteLaxMode},
 			"https://auth.example.com"), Cookie: transport.AuthConfig{CookieName: "ygg_session"}},
@@ -100,7 +118,8 @@ func newEnv(t *testing.T) *env {
 				Identity:      svc,
 				OIDC:          clientSvc,
 				OIDCKeys:      testKeys,
-				Settings:      config.NewSettingStore(pool),
+				Settings:      settings,
+				Mailer:        mailerStub,
 				DB:            pool,
 				Logger:        nopLogger{},
 				PublicBaseURL: "https://auth.example.com",
@@ -108,7 +127,10 @@ func newEnv(t *testing.T) *env {
 		},
 	}).Handler()
 
-	return &env{handler: handler, svc: svc, clientService: clientSvc, keys: testKeys, pool: pool}
+	return &env{
+		handler: handler, svc: svc, clientService: clientSvc, keys: testKeys,
+		pool: pool, settings: settings, mailer: mailerStub,
+	}
 }
 
 type envelope struct {

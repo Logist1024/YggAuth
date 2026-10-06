@@ -11,10 +11,19 @@ import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { useAdminStore, type MenuItem } from '../stores/admin'
+import { publicConfig } from '@yggauth/shared'
 
 const store = useAdminStore()
 const route = useRoute()
 const router = useRouter()
+
+/**
+ * 站点名:来自 GET /api/public/config(路由守卫已在渲染前拉过)。
+ *
+ * 左栏以前写死「YggAuth 管理后台」—— 后台改了站点名,这行还是旧的,
+ * 又是一次「改了没用」,而且没有任何报错。
+ */
+const siteName = publicConfig().site_name || 'YggAuth'
 
 /**
  * 侧栏是否收起。
@@ -76,7 +85,7 @@ async function onLogout(): Promise<void> {
       collapsible
     >
       <div style="padding: 16px; font-weight: 600; color: #3b6ea5; font-size: 16px">
-        YggAuth 管理后台
+        {{ siteName }} 管理后台
       </div>
       <a-menu mode="inline" :selected-keys="selectedKeys">
         <a-menu-item v-for="item in layout.ungrouped" :key="item.key">

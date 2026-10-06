@@ -64,6 +64,18 @@ type Config struct {
 	VerifyCooldown time.Duration
 	// VerifyDailyLimit 是单账号每日重发上限。0 表示不限制。
 	VerifyDailyLimit int
+	// Settings 是运行时配置快照:登记过的键可以从后台改,**不重启生效**。
+	//
+	// 为 nil 时全部退回 env(单测、以及只关心某一段逻辑的用例不必搭配置表)。
+	// 这里刻意用接口而不是 *config.Snapshot:消费方只需要三个读方法。
+	Settings Settings
+}
+
+// Settings 是运行时配置的读取能力(docs/configuration.md §6.1)。
+type Settings interface {
+	String(ctx context.Context, key, fallback string) string
+	Int(ctx context.Context, key string, fallback int) int
+	Bool(ctx context.Context, key string, fallback bool) bool
 }
 
 // LeakChecker 检查密码是否出现在公开泄露库中。
@@ -173,15 +185,25 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (RegisterOutpu
 	if err := ValidateEmail(email); err != nil {
 		return RegisterOutput{}, err
 	}
-	if err := s.cfg.Policy.Validate(in.Password); err != nil {
+	// 注册模式优先判定:站点已经关门时,还去提示「密码不够强」是误导。
+	//
+	// 只把前端的注册入口藏起来不算关闭 —— 换个 curl 就绕过去了,
+	// 所以接口本身必须拒绝(docs/configuration.md §6.3)。
+	mode := s.registrationMode(ctx)
+	if mode == "closed" {
+		return RegisterOutput{}, apperr.New(apperr.CodeRegistrationClosed, "注册已关闭")
+	}
+	if err := s.policy(ctx).Validate(in.Password); err != nil {
 		return RegisterOutput{}, err
 	}
-	if s.cfg.RegistrationMode == "invite_only" && strings.TrimSpace(in.InviteCode) == "" {
+	// 只读一次模式:读两次的话,两次之间的一次后台修改会让
+	// 「要不要邀请码」和「消不消耗邀请码」分家。
+	if mode == "invite_only" && strings.TrimSpace(in.InviteCode) == "" {
 		return RegisterOutput{}, ErrInviteRequired
 	}
 
 	// 邀请码核销。放在密码哈希之前:一个无效邀请码不该让服务白算一次 argon2id。
-	if s.cfg.RegistrationMode == "invite_only" {
+	if mode == "invite_only" {
 		if s.cfg.Invitations == nil {
 			return RegisterOutput{}, apperr.New(apperr.CodeInternal, "邀请码注册模式未配置邀请码存储")
 		}
@@ -224,7 +246,7 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (RegisterOutpu
 		Username:     username,
 		Email:        email,
 		Status:       status,
-		LoginEnabled: s.cfg.LoginEnabledDefault,
+		LoginEnabled: s.boolSetting(ctx, "registration.mc_login_default", s.cfg.LoginEnabledDefault),
 	})
 	if err != nil {
 		if apperr.Is(err, apperr.CodeConflict) {
@@ -300,6 +322,9 @@ type AuthenticateOutput struct {
 	Account      domain.Account
 	SessionToken string
 	ExpiresAt    time.Time
+	// MustChangePassword 表示这枚凭据被要求更换(引导建号置位)。
+	// 登录处理器据此把旗标投到本次会话上,让认证中间件读会话行即可判断。
+	MustChangePassword bool
 }
 
 // Authenticate 校验邮箱与密码。
@@ -335,8 +360,9 @@ func (s *Service) Authenticate(ctx context.Context, in AuthenticateInput) (Authe
 	}
 
 	if !s.hasher.Verify(in.Password, cred.Hash) {
-		shouldLock := cred.FailedAttempts+1 >= s.cfg.MaxFailedAttempts
-		if _, err := s.repo.RecordFailedAttempt(ctx, acc.ID, AlgoArgon2id, shouldLock, s.cfg.LockDuration); err != nil {
+		attempts, lock := s.lockPolicy(ctx)
+		shouldLock := cred.FailedAttempts+1 >= attempts
+		if _, err := s.repo.RecordFailedAttempt(ctx, acc.ID, AlgoArgon2id, shouldLock, lock); err != nil {
 			s.logger.Error("record failed attempt", "account_id", acc.ID, "error", err)
 		}
 		s.auditFailure(ctx, &acc.ID, "account.login", in.IP, in.UserAgent)
@@ -364,7 +390,7 @@ func (s *Service) Authenticate(ctx context.Context, in AuthenticateInput) (Authe
 		s.logger.Error("reset failed attempts", "account_id", acc.ID, "error", err)
 	}
 
-	// 登录成功必须留痕(docs/09-security.md 9.1)。
+	// 登录成功必须留痕(docs/security.md 9.1)。
 	s.audit(ctx, Event{
 		AccountID:  &acc.ID,
 		Actor:      domain.AuditActorAccount(acc.ID),
@@ -376,7 +402,7 @@ func (s *Service) Authenticate(ctx context.Context, in AuthenticateInput) (Authe
 		UserAgent:  in.UserAgent,
 	})
 
-	return AuthenticateOutput{Account: acc}, nil
+	return AuthenticateOutput{Account: acc, MustChangePassword: cred.MustChange}, nil
 }
 
 // dummyHash 在账号不存在时执行一次等价开销的哈希运算,拉平响应时间。
@@ -532,22 +558,25 @@ func (s *Service) ResendVerification(ctx context.Context, in ResendVerificationI
 		return nil
 	}
 
-	if s.cfg.VerifyCooldown > 0 {
+	cooldown := time.Duration(s.intSetting(ctx, "mail.verify_cooldown_seconds",
+		int(s.cfg.VerifyCooldown.Seconds()))) * time.Second
+	if cooldown > 0 {
 		last, ok, err := s.tokens.LastCreatedAt(ctx, acc.ID, PurposeVerifyEmail)
 		if err != nil {
 			return err
 		}
-		if ok && s.clock.Now().Sub(last) < s.cfg.VerifyCooldown {
+		if ok && s.clock.Now().Sub(last) < cooldown {
 			s.logger.Info("verify email resend throttled", "account_id", acc.ID, "reason", "cooldown")
 			return nil
 		}
 	}
-	if s.cfg.VerifyDailyLimit > 0 {
+	daily := s.intSetting(ctx, "mail.verify_daily_limit", s.cfg.VerifyDailyLimit)
+	if daily > 0 {
 		n, err := s.tokens.CountSince(ctx, acc.ID, PurposeVerifyEmail, s.clock.Now().Add(-24*time.Hour))
 		if err != nil {
 			return err
 		}
-		if int(n) >= s.cfg.VerifyDailyLimit {
+		if int(n) >= daily {
 			s.logger.Warn("verify email resend throttled", "account_id", acc.ID, "reason", "daily_limit")
 			return nil
 		}
@@ -643,7 +672,7 @@ type ResetPasswordInput struct {
 
 // ResetPassword 用令牌重置密码。
 func (s *Service) ResetPassword(ctx context.Context, in ResetPasswordInput) (domain.Account, error) {
-	if err := s.cfg.Policy.Validate(in.Password); err != nil {
+	if err := s.policy(ctx).Validate(in.Password); err != nil {
 		return domain.Account{}, err
 	}
 
@@ -659,6 +688,13 @@ func (s *Service) ResetPassword(ctx context.Context, in ResetPasswordInput) (dom
 	}
 	if _, err := s.repo.UpsertCredential(ctx, accountID, AlgoArgon2id, hash); err != nil {
 		return domain.Account{}, err
+	}
+	// 密码换了,首登强制改密的真源旗标跟着清零 —— 否则「找回密码」
+	// 换来的密码仍会被认证中间件拦成「必须改密码」,形成死循环。
+	// 清失败不阻断本次重置(密码确实已经换掉):保守地多强制一次,
+	// 比对外报「重置失败」而实际已重置更安全。
+	if err := s.repo.SetMustChange(ctx, accountID, AlgoArgon2id, false); err != nil {
+		s.logger.Error("clear must_change flag failed", "account_id", accountID, "error", err)
 	}
 
 	acc, err := s.repo.GetByID(ctx, accountID)
@@ -797,7 +833,7 @@ func (s *Service) ChangePassword(ctx context.Context, in ChangePasswordInput) er
 		s.auditFailure(ctx, &in.AccountID, "account.password_change", in.IP, in.UserAgent)
 		return apperr.New(apperr.CodeInvalidPassword, "原密码错误")
 	}
-	if err := s.cfg.Policy.Validate(in.NewPassword); err != nil {
+	if err := s.policy(ctx).Validate(in.NewPassword); err != nil {
 		return err
 	}
 
@@ -807,6 +843,11 @@ func (s *Service) ChangePassword(ctx context.Context, in ChangePasswordInput) er
 	}
 	if _, err := s.repo.UpsertCredential(ctx, in.AccountID, AlgoArgon2id, hash); err != nil {
 		return err
+	}
+	// 改密本身就是「要求改密」这个旗标的答案,这里显式清零真源。
+	// 清失败只记日志:旧登录态随后会被全部吊销,最坏是再强制改一次。
+	if err := s.repo.SetMustChange(ctx, in.AccountID, AlgoArgon2id, false); err != nil {
+		s.logger.Error("clear must_change flag failed", "account_id", in.AccountID, "error", err)
 	}
 
 	s.audit(ctx, Event{
@@ -929,8 +970,9 @@ func (s *Service) AuthenticateForGame(ctx context.Context, in GameAuthInput) (do
 	}
 
 	if !s.hasher.Verify(in.Password, cred.Hash) {
-		shouldLock := cred.FailedAttempts+1 >= s.cfg.MaxFailedAttempts
-		if _, err := s.repo.RecordFailedAttempt(ctx, acc.ID, AlgoArgon2id, shouldLock, s.cfg.LockDuration); err != nil {
+		attempts, lock := s.lockPolicy(ctx)
+		shouldLock := cred.FailedAttempts+1 >= attempts
+		if _, err := s.repo.RecordFailedAttempt(ctx, acc.ID, AlgoArgon2id, shouldLock, lock); err != nil {
 			s.logger.Error("record failed attempt", "account_id", acc.ID, "error", err)
 		}
 		if shouldLock {
@@ -988,9 +1030,63 @@ func (s *Service) GameLoginEnabled(ctx context.Context, accountID uuid.UUID) (bo
 // 暴露它是为了让前端**不抄**一份校验规则:策略变了(比如把最小长度
 // 从 8 提到 12),前端应当自动跟着变,而不是继续提示「至少 8 位」
 // 然后被后端拒绝。
-func (s *Service) Policy() Policy { return s.cfg.Policy }
+//
+// 每次调用现读:策略是后台可改的,构造时取一次快照的话,
+// 改完设置接口返回的还是老值 —— 那就是「改了没用」。
+func (s *Service) Policy(ctx context.Context) Policy { return s.policy(ctx) }
 
 // RegistrationMode 返回当前注册模式(open / invite_only / closed)。
 //
 // 前端据此决定要不要显示「注册」入口。
-func (s *Service) RegistrationMode() string { return s.cfg.RegistrationMode }
+func (s *Service) RegistrationMode(ctx context.Context) string { return s.registrationMode(ctx) }
+
+// policy 从配置快照拼出当前密码策略,env 兜底。
+func (s *Service) policy(ctx context.Context) Policy {
+	p := s.cfg.Policy
+	if s.cfg.Settings == nil {
+		return p
+	}
+	p.MinLength = s.cfg.Settings.Int(ctx, "password.min_length", p.MinLength)
+	p.MaxLength = s.cfg.Settings.Int(ctx, "password.max_length", p.MaxLength)
+	p.RejectCommon = s.cfg.Settings.Bool(ctx, "password.reject_common", p.RejectCommon)
+	return p
+}
+
+// registrationMode 读当前注册模式。
+//
+// 单独一个方法是为了保证 **Register 里读到的模式只有一个** ——
+// 读两次的话,两次之间的一次后台修改会让「有没有邀请码」的判断
+// 和「消耗不消耗邀请码」的判断分家。
+func (s *Service) registrationMode(ctx context.Context) string {
+	if s.cfg.Settings == nil {
+		return s.cfg.RegistrationMode
+	}
+	return s.cfg.Settings.String(ctx, "registration.mode", s.cfg.RegistrationMode)
+}
+
+// intSetting 读一个整型键,未装配快照时用 fallback。
+func (s *Service) intSetting(ctx context.Context, key string, fallback int) int {
+	if s.cfg.Settings == nil {
+		return fallback
+	}
+	return s.cfg.Settings.Int(ctx, key, fallback)
+}
+
+// boolSetting 读一个布尔键,未装配快照时用 fallback。
+func (s *Service) boolSetting(ctx context.Context, key string, fallback bool) bool {
+	if s.cfg.Settings == nil {
+		return fallback
+	}
+	return s.cfg.Settings.Bool(ctx, key, fallback)
+}
+
+// lockPolicy 读当前锁定阈值与时长。
+func (s *Service) lockPolicy(ctx context.Context) (attempts int, lock time.Duration) {
+	attempts, lock = s.cfg.MaxFailedAttempts, s.cfg.LockDuration
+	if s.cfg.Settings == nil {
+		return attempts, lock
+	}
+	attempts = s.cfg.Settings.Int(ctx, "login.max_failed_attempts", attempts)
+	seconds := s.cfg.Settings.Int(ctx, "login.lock_seconds", int(lock.Seconds()))
+	return attempts, time.Duration(seconds) * time.Second
+}

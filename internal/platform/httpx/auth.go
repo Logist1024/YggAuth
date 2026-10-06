@@ -103,7 +103,7 @@ func RequirePermission(permission string) func(http.Handler) http.Handler {
 
 // CSRFProtect 校验写操作的同源要求。
 //
-// 配合 SameSite=Lax Cookie 构成 CSRF 双防线(docs/09-security.md 3.3)。
+// 配合 SameSite=Lax Cookie 构成 CSRF 双防线(docs/security.md 3.3)。
 func CSRFProtect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {

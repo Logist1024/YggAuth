@@ -1,6 +1,6 @@
 // Package apperr 定义业务错误码体系。
 //
-// 错误码按区间划分(见 docs/05-api.md 1.2):
+// 错误码按区间划分(见 docs/api.md 1.2):
 //
 //	0      成功
 //	1xxxx  通用错误(参数、限流、服务器内部错误)
@@ -48,6 +48,13 @@ const (
 	CodeInviteRequired  Code = 20010
 	CodeInviteInvalid   Code = 20011
 	CodeSessionExpired  Code = 20012
+	// CodePasswordChangeRequired:登录成功但这枚凭据被要求更换
+	// (引导流程置位的 must_change)。用 403 而不是 401:
+	// 登录态是有效的,失效的是「继续往下走」的资格,重新登录也绕不过去。
+	CodePasswordChangeRequired Code = 20013
+	// CodeRegistrationClosed 是「注册入口已关闭」(registration.mode=closed)。
+	// 403 而不是 400:请求本身没写错,是站点当前不收新人。
+	CodeRegistrationClosed Code = 20014
 
 	// 3xxxx 权限
 	CodeForbidden Code = 30001
@@ -92,18 +99,20 @@ var meta = map[Code]codeMeta{
 	CodePayloadTooLarge: {message: "请求体过大", httpStatus: http.StatusRequestEntityTooLarge},
 	CodeUnavailable:     {message: "服务暂时不可用", httpStatus: http.StatusServiceUnavailable},
 
-	CodeUnauthorized:    {message: "未认证或凭证无效", httpStatus: http.StatusUnauthorized},
-	CodeInvalidPassword: {message: "邮箱或密码错误", httpStatus: http.StatusUnauthorized},
-	CodeAccountDisabled: {message: "账号已被禁用", httpStatus: http.StatusForbidden},
-	CodeEmailTaken:      {message: "邮箱已注册", httpStatus: http.StatusConflict},
-	CodeUsernameTaken:   {message: "用户名已存在", httpStatus: http.StatusConflict},
-	CodeAccountLocked:   {message: "登录失败次数过多,账号已锁定", httpStatus: http.StatusTooManyRequests},
-	CodeWeakPassword:    {message: "密码不符合安全策略", httpStatus: http.StatusBadRequest},
-	CodeInvalidToken:    {message: "令牌无效或已过期", httpStatus: http.StatusBadRequest},
-	CodeEmailUnverified: {message: "邮箱尚未验证", httpStatus: http.StatusConflict},
-	CodeInviteRequired:  {message: "该系统需要邀请码才能注册", httpStatus: http.StatusForbidden},
-	CodeInviteInvalid:   {message: "邀请码无效或已用尽", httpStatus: http.StatusBadRequest},
-	CodeSessionExpired:  {message: "登录态已过期,请重新登录", httpStatus: http.StatusUnauthorized},
+	CodeUnauthorized:           {message: "未认证或凭证无效", httpStatus: http.StatusUnauthorized},
+	CodeInvalidPassword:        {message: "邮箱或密码错误", httpStatus: http.StatusUnauthorized},
+	CodeAccountDisabled:        {message: "账号已被禁用", httpStatus: http.StatusForbidden},
+	CodeEmailTaken:             {message: "邮箱已注册", httpStatus: http.StatusConflict},
+	CodeUsernameTaken:          {message: "用户名已存在", httpStatus: http.StatusConflict},
+	CodeAccountLocked:          {message: "登录失败次数过多,账号已锁定", httpStatus: http.StatusTooManyRequests},
+	CodeWeakPassword:           {message: "密码不符合安全策略", httpStatus: http.StatusBadRequest},
+	CodeInvalidToken:           {message: "令牌无效或已过期", httpStatus: http.StatusBadRequest},
+	CodeEmailUnverified:        {message: "邮箱尚未验证", httpStatus: http.StatusConflict},
+	CodeInviteRequired:         {message: "该系统需要邀请码才能注册", httpStatus: http.StatusForbidden},
+	CodeInviteInvalid:          {message: "邀请码无效或已用尽", httpStatus: http.StatusBadRequest},
+	CodeSessionExpired:         {message: "登录态已过期,请重新登录", httpStatus: http.StatusUnauthorized},
+	CodePasswordChangeRequired: {message: "首次登录必须修改密码", httpStatus: http.StatusForbidden},
+	CodeRegistrationClosed:     {message: "注册已关闭", httpStatus: http.StatusForbidden},
 
 	CodeForbidden:        {message: "权限不足", httpStatus: http.StatusForbidden},
 	CodePermissionDenied: {message: "需要更高的权限", httpStatus: http.StatusForbidden},
@@ -173,7 +182,7 @@ type Error struct {
 	Code Code
 	// Message 覆盖默认消息。为空时用 Code.Message()。
 	Message string
-	// Detail 只进日志,**绝不**返回给调用方(见 docs/09-security.md 10)。
+	// Detail 只进日志,**绝不**返回给调用方(见 docs/security.md 10)。
 	Detail string
 }
 

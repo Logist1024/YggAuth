@@ -65,7 +65,13 @@ func TestComposeReferencesOnlyKnownEnvVars(t *testing.T) {
 		"TZ":                true,
 		"SSO_COOKIE_SECURE": true, "SSO_COOKIE_DOMAIN": true, "SSO_COOKIE_SAMESITE": true,
 		"MAILER_TRANSPORT": true, "MAILER_FROM": true,
-		"SMTP_HOST": true, "SMTP_PORT": true, "SMTP_USERNAME": true, "SMTP_PASSWORD": true,
+		// 注意:这个 map 里曾经有一条 SMTP 废弃名的白名单(smtp 的用户名键,
+		// 用了 _USERNAME 后缀)。它是**照着 bug 写的条目** —— compose 传
+		// _USERNAME、config 读 _USER,两边对不上,而白名单把检查变成了
+		// 「只要被记下来就放行」,于是 D3 一直活到了部署那天。
+		// 命名统一为 SMTP_USER 后该条删除;真正的双向核对见
+		// internal/config/envfiles_test.go。
+		"SMTP_HOST": true, "SMTP_PORT": true, "SMTP_PASSWORD": true,
 		"MC_ENABLED": true, "MC_SERVER_SHARED_SECRET": true,
 	}
 

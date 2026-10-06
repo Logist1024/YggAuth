@@ -16,7 +16,7 @@ declare module 'vue-router' {
   }
 }
 
-import { ApiError, ErrCode } from '@yggauth/shared'
+import { ApiError, ErrCode, loadPublicConfig, publicConfig } from '@yggauth/shared'
 
 import { useSessionStore } from './stores/session'
 import AuthLayout from './layouts/AuthLayout.vue'
@@ -61,6 +61,9 @@ const routes: RouteRecordRaw[] = [
     children: [
       { path: '', name: 'overview', meta: { title: '账号概览' }, component: () => import('./views/OverviewView.vue') },
       { path: 'security', name: 'security', meta: { title: '安全设置' }, component: () => import('./views/SecurityView.vue') },
+      // 首登强制改密的目标页:改完它会带着 relogin_required 把人送回登录页,
+      // 所以它不需要「跳过」按钮 —— 后端对放行名单之外的请求一律 403。
+      { path: 'password/change', name: 'password-change', meta: { title: '修改密码' }, component: () => import('./views/ChangePasswordView.vue') },
       { path: 'skin', name: 'skin', meta: { title: '皮肤管理' }, component: () => import('./views/SkinView.vue') },
       { path: 'sessions', name: 'sessions', meta: { title: '登录设备' }, component: () => import('./views/SessionsView.vue') },
       { path: 'audit', name: 'audit', meta: { title: '操作记录' }, component: () => import('./views/AuditView.vue') },
@@ -90,10 +93,15 @@ export const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
+  // 站点名称是后台可改的设置:首次导航拉一次公开配置(之后命中缓存)。
+  // 拉不到会退回兜底值,不会把导航卡死。
+  await loadPublicConfig()
+
   // 先设标签页标题:下面有两处提前 return(未登录跳转、无需登录的公开页),
   // 放在末尾会让登录页、验证页、404 一直停在 index.html 的默认标题。
+  // 站点名来自**设置**而不是写死的字符串 —— 否则「站点名称」这项设置对 <title> 无效。
   if (to.meta.title) {
-    document.title = `${to.meta.title} · YggAuth`
+    document.title = `${to.meta.title} · ${publicConfig().site_name}`
   }
 
   const store = useSessionStore()
@@ -126,6 +134,15 @@ router.beforeEach(async (to) => {
 
   if (!store.account) {
     return { name: 'login', query: { redirect: to.fullPath } }
+  }
+
+  // 首登强制改密:旗标置位时,除改密页本身外一律送去改密页。
+  //
+  // 后端也在拦(每个非白名单请求回 20013),这道只是让用户
+  // **先看到一个正经页面**而不是满屏红色错误 —— 放在 requireAuth
+  // 判断之后,是因为旗标就存在会话里,没登录时它无从谈起。
+  if (store.mustChangePassword && to.name !== 'password-change') {
+    return { name: 'password-change', query: { redirect: to.fullPath } }
   }
   return true
 })

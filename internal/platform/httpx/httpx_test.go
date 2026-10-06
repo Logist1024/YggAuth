@@ -47,7 +47,7 @@ func TestFailSetsBothHTTPStatusAndCode(t *testing.T) {
 	require.Nil(t, body.Data, "错误响应里 data 必须为 null")
 }
 
-// 内部错误的细节绝不外泄(docs/09-security.md 第十节)。
+// 内部错误的细节绝不外泄(docs/security.md 第十节)。
 func TestFailHidesInternalDetail(t *testing.T) {
 	rec := httptest.NewRecorder()
 	httpx.Fail(rec, errors.New("pq: FATAL: password authentication failed for user \"yggauth\""))
@@ -232,13 +232,13 @@ func TestRequireAuthDistinguishesMissingAndRejectedCredential(t *testing.T) {
 
 	// 没带凭据 → 20001
 	rec := httptest.NewRecorder()
-	httpx.RequireAuth(next).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/account", nil))
+	httpx.RequireAuth(next).ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/account", nil))
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 	require.Equal(t, apperr.CodeUnauthorized, decode(t, rec).Code)
 
 	// 带了但已被拒绝 → 20012,消息要能直接读
 	rec = httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/account", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/account", nil)
 	req = req.WithContext(httpx.WithRejectedCredential(req.Context()))
 	httpx.RequireAuth(next).ServeHTTP(rec, req)
 	require.Equal(t, http.StatusUnauthorized, rec.Code)

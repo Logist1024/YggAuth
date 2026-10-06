@@ -31,7 +31,7 @@ const createSession = `-- name: CreateSession :one
 INSERT INTO identity.session (
     account_id, token_hash, sso_session_id, expires_at, idle_expires_at, ip, user_agent)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, account_id, token_hash, sso_session_id, created_at, last_seen_at, expires_at, idle_expires_at, revoked_at, revoke_reason, ip, user_agent
+RETURNING id, account_id, token_hash, sso_session_id, created_at, last_seen_at, expires_at, idle_expires_at, revoked_at, revoke_reason, ip, user_agent, must_change_password
 `
 
 type CreateSessionParams struct {
@@ -69,6 +69,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (I
 		&i.RevokeReason,
 		&i.Ip,
 		&i.UserAgent,
+		&i.MustChangePassword,
 	)
 	return i, err
 }
@@ -89,7 +90,7 @@ func (q *Queries) DeleteExpiredSessions(ctx context.Context) (int64, error) {
 }
 
 const getActiveSessionByTokenHash = `-- name: GetActiveSessionByTokenHash :one
-SELECT id, account_id, token_hash, sso_session_id, created_at, last_seen_at, expires_at, idle_expires_at, revoked_at, revoke_reason, ip, user_agent FROM identity.session
+SELECT id, account_id, token_hash, sso_session_id, created_at, last_seen_at, expires_at, idle_expires_at, revoked_at, revoke_reason, ip, user_agent, must_change_password FROM identity.session
 WHERE token_hash = $1
   AND revoked_at IS NULL
   AND idle_expires_at > now()
@@ -113,12 +114,13 @@ func (q *Queries) GetActiveSessionByTokenHash(ctx context.Context, tokenHash []b
 		&i.RevokeReason,
 		&i.Ip,
 		&i.UserAgent,
+		&i.MustChangePassword,
 	)
 	return i, err
 }
 
 const getSessionByID = `-- name: GetSessionByID :one
-SELECT id, account_id, token_hash, sso_session_id, created_at, last_seen_at, expires_at, idle_expires_at, revoked_at, revoke_reason, ip, user_agent FROM identity.session WHERE id = $1
+SELECT id, account_id, token_hash, sso_session_id, created_at, last_seen_at, expires_at, idle_expires_at, revoked_at, revoke_reason, ip, user_agent, must_change_password FROM identity.session WHERE id = $1
 `
 
 func (q *Queries) GetSessionByID(ctx context.Context, id uuid.UUID) (IdentitySession, error) {
@@ -137,12 +139,13 @@ func (q *Queries) GetSessionByID(ctx context.Context, id uuid.UUID) (IdentitySes
 		&i.RevokeReason,
 		&i.Ip,
 		&i.UserAgent,
+		&i.MustChangePassword,
 	)
 	return i, err
 }
 
 const getSessionBySSOID = `-- name: GetSessionBySSOID :many
-SELECT id, account_id, token_hash, sso_session_id, created_at, last_seen_at, expires_at, idle_expires_at, revoked_at, revoke_reason, ip, user_agent FROM identity.session
+SELECT id, account_id, token_hash, sso_session_id, created_at, last_seen_at, expires_at, idle_expires_at, revoked_at, revoke_reason, ip, user_agent, must_change_password FROM identity.session
 WHERE sso_session_id = $1 AND revoked_at IS NULL
 `
 
@@ -169,6 +172,7 @@ func (q *Queries) GetSessionBySSOID(ctx context.Context, ssoSessionID pgtype.UUI
 			&i.RevokeReason,
 			&i.Ip,
 			&i.UserAgent,
+			&i.MustChangePassword,
 		); err != nil {
 			return nil, err
 		}
@@ -195,7 +199,7 @@ func (q *Queries) LinkSessionToSSO(ctx context.Context, arg LinkSessionToSSOPara
 }
 
 const listActiveSessions = `-- name: ListActiveSessions :many
-SELECT id, account_id, token_hash, sso_session_id, created_at, last_seen_at, expires_at, idle_expires_at, revoked_at, revoke_reason, ip, user_agent FROM identity.session
+SELECT id, account_id, token_hash, sso_session_id, created_at, last_seen_at, expires_at, idle_expires_at, revoked_at, revoke_reason, ip, user_agent, must_change_password FROM identity.session
 WHERE account_id = $1
   AND revoked_at IS NULL
   AND idle_expires_at > now()
@@ -225,6 +229,7 @@ func (q *Queries) ListActiveSessions(ctx context.Context, accountID uuid.UUID) (
 			&i.RevokeReason,
 			&i.Ip,
 			&i.UserAgent,
+			&i.MustChangePassword,
 		); err != nil {
 			return nil, err
 		}
@@ -259,7 +264,7 @@ const revokeSession = `-- name: RevokeSession :one
 UPDATE identity.session
 SET revoked_at = now(), revoke_reason = $2
 WHERE id = $1 AND revoked_at IS NULL
-RETURNING id, account_id, token_hash, sso_session_id, created_at, last_seen_at, expires_at, idle_expires_at, revoked_at, revoke_reason, ip, user_agent
+RETURNING id, account_id, token_hash, sso_session_id, created_at, last_seen_at, expires_at, idle_expires_at, revoked_at, revoke_reason, ip, user_agent, must_change_password
 `
 
 type RevokeSessionParams struct {
@@ -283,14 +288,31 @@ func (q *Queries) RevokeSession(ctx context.Context, arg RevokeSessionParams) (I
 		&i.RevokeReason,
 		&i.Ip,
 		&i.UserAgent,
+		&i.MustChangePassword,
 	)
 	return i, err
+}
+
+const setSessionMustChangePassword = `-- name: SetSessionMustChangePassword :exec
+UPDATE identity.session SET must_change_password = $2 WHERE id = $1
+`
+
+type SetSessionMustChangePasswordParams struct {
+	ID                 uuid.UUID `json:"id"`
+	MustChangePassword bool      `json:"must_change_password"`
+}
+
+// 把凭据上的 must_change 真源投到本次会话上,认证中间件读这一列即可,
+// 不必为判断强制改密在每个请求上多查一次凭据(见迁移 00008 的注释)。
+func (q *Queries) SetSessionMustChangePassword(ctx context.Context, arg SetSessionMustChangePasswordParams) error {
+	_, err := q.db.Exec(ctx, setSessionMustChangePassword, arg.ID, arg.MustChangePassword)
+	return err
 }
 
 const touchSession = `-- name: TouchSession :one
 UPDATE identity.session SET last_seen_at = now(), idle_expires_at = $2
 WHERE id = $1 AND revoked_at IS NULL
-RETURNING id, account_id, token_hash, sso_session_id, created_at, last_seen_at, expires_at, idle_expires_at, revoked_at, revoke_reason, ip, user_agent
+RETURNING id, account_id, token_hash, sso_session_id, created_at, last_seen_at, expires_at, idle_expires_at, revoked_at, revoke_reason, ip, user_agent, must_change_password
 `
 
 type TouchSessionParams struct {
@@ -315,6 +337,7 @@ func (q *Queries) TouchSession(ctx context.Context, arg TouchSessionParams) (Ide
 		&i.RevokeReason,
 		&i.Ip,
 		&i.UserAgent,
+		&i.MustChangePassword,
 	)
 	return i, err
 }

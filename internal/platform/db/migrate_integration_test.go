@@ -3,11 +3,22 @@
 package db_test
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/yggauth/yggauth/internal/platform/db"
 	"github.com/yggauth/yggauth/internal/platform/db/testdb"
 )
+
+// migrationFiles 列出全部迁移文件(相对本测试包目录)。
+func migrationFiles(t *testing.T) []string {
+	t.Helper()
+	files, err := filepath.Glob("../../../db/migrations/*.sql")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("读取迁移文件列表失败: files=%v err=%v", files, err)
+	}
+	return files
+}
 
 // TestMigrationsApplyAndRollback 验证基线迁移能在真实 PostgreSQL 16 上跑通,
 // 并且每个 schema 的关键对象都真的建出来了。
@@ -25,8 +36,13 @@ func TestMigrationsApplyAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取迁移版本失败: %v", err)
 	}
-	if version != 7 {
-		t.Fatalf("迁移版本 = %d,期望 7", version)
+	// 期望版本 = db/migrations 下的迁移文件数。
+	//
+	// 这里原先写死 7,加了 00008 之后红得很含糊(「版本 = 8,期望 7」),
+	// 而唯一会改这个数字的时机恰恰是「加了一条迁移」—— 忘了改就成了常态。
+	want := int64(len(migrationFiles(t)))
+	if version != want {
+		t.Fatalf("迁移版本 = %d,期望 %d(共 %d 个迁移文件)", version, want, want)
 	}
 
 	// 四个 schema 必须存在(ADR-002 的域隔离手段)。

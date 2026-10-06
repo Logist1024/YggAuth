@@ -62,6 +62,17 @@ export class ApiError extends Error {
     return this.code !== ErrCode.INVALID_PASSWORD && this.code !== ErrCode.ACCOUNT_LOCKED
   }
 
+  /**
+   * 登录态有效,但被要求先改密码(20013)。
+   *
+   * 与 requiresLogin 刻意分开:两者要做的动作相反 ——
+   * 那个把人送去登录页,这个把人送去改密页。混成一个判断的结果是
+   * 用户被踢去登录、重新登录、再被挡回改密页,永远转不出去。
+   */
+  get requiresPasswordChange(): boolean {
+    return this.code === ErrCode.PASSWORD_CHANGE_REQUIRED
+  }
+
   /** 供支持人员定位的一行信息:错误码 + HTTP 状态。 */
   get trace(): string {
     return `错误码 ${this.code} · HTTP ${this.status}`

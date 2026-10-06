@@ -48,7 +48,7 @@ func NoContent(w http.ResponseWriter) {
 // Fail 按业务错误码返回错误响应。
 //
 // 内部错误只回泛化消息,细节进日志 —— 调用方拿不到任何栈信息
-// (docs/09-security.md 第十节:错误响应不泄露内部细节)。
+// (docs/security.md 第十节:错误响应不泄露内部细节)。
 func Fail(w http.ResponseWriter, err error) {
 	be := apperr.From(err)
 	status := be.HTTPStatus()

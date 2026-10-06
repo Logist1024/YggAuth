@@ -134,6 +134,28 @@ func (q *Queries) GetRoleByID(ctx context.Context, id uuid.UUID) (IdentityRole, 
 	return i, err
 }
 
+const getRoleForUpdate = `-- name: GetRoleForUpdate :one
+SELECT id, code, name, description, is_system, created_at, updated_at FROM identity.role WHERE code = $1 FOR UPDATE
+`
+
+// 行级排他锁。首启引导用它把「并发创建管理员」串行化:
+// 这行由基线迁移种下、且带 is_system,永远存在,是天然的锁对象,
+// 不必引入魔数式的 advisory lock 键。
+func (q *Queries) GetRoleForUpdate(ctx context.Context, code string) (IdentityRole, error) {
+	row := q.db.QueryRow(ctx, getRoleForUpdate, code)
+	var i IdentityRole
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.Name,
+		&i.Description,
+		&i.IsSystem,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const grantRole = `-- name: GrantRole :one
 INSERT INTO identity.account_role (account_id, role_id, granted_by)
 VALUES ($1, $2, $3)

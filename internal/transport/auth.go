@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -87,6 +88,13 @@ func SessionAuth(auth SessionAuthenticator, cfg AuthConfig) func(http.Handler) h
 				return
 			}
 
+			// 首登强制改密:旗标在会话行上(登录时从凭据投的影),在取权限
+			// 之前就拦下 —— 必须先改密,后面那些查询一次都不必做。
+			if res.Session.MustChangePassword && !mustChangeAllowed(r.URL.Path) {
+				httpx.Fail(w, apperr.New(apperr.CodePasswordChangeRequired, "首次登录必须修改密码"))
+				return
+			}
+
 			codes, err := auth.PermissionsFor(r.Context(), acc.ID)
 			if err != nil {
 				httpx.Fail(w, apperr.From(err))
@@ -101,11 +109,38 @@ func SessionAuth(auth SessionAuthenticator, cfg AuthConfig) func(http.Handler) h
 				Email:       acc.Email,
 				SessionID:   res.Session.ID,
 				Permissions: codes,
+				// 拦截判断已经在上面做过一次了,这里原样带出,
+				// 让 /api/auth/session 与 /api/account/ 能把旗标告诉前端。
+				MustChangePassword: res.Session.MustChangePassword,
 			}
 			ctx := httpx.WithPrincipal(r.Context(), p)
 			ctx = log.WithFields(ctx, log.KeyAccountID, acc.ID)
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
+	}
+}
+
+// mustChangeAllowed 列出「强制改密期间仍可访问」的路径。
+//
+// 放行三类,都是这条强制流程自身需要的:
+//
+//	/api/auth/*          登录、会话自举、登出 —— 前端要靠它们知道该跳哪儿
+//	/api/account/password 改密本身(不然永远改不成)
+//	/api/account/         GET Me:前端渲染顶栏/用户名
+//
+// 其余一律拦下,包括管理后台的 /api/admin/*:管理员的初始密码也必须先换。
+// 白名单按前缀匹配并以 / 结尾收口,避免 `/api/account/` 意外放行
+// `/api/account/password` 之外更长的同前缀路径。
+func mustChangeAllowed(path string) bool {
+	switch {
+	case strings.HasPrefix(path, "/api/auth/"):
+		return true
+	case path == "/api/account/password":
+		return true
+	case path == "/api/account/", path == "/api/account":
+		return true
+	default:
+		return false
 	}
 }

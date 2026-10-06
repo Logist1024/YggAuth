@@ -133,6 +133,21 @@ func (r *fakeRepo) RevokeAll(_ context.Context, accountID uuid.UUID, _ string) e
 
 func (r *fakeRepo) LinkSSO(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
+// SetMustChangePassword 记录登录时投到会话上的强制改密旗标,
+// 让上层测试能断言「认证读到的是会话行上的那份」。
+func (r *fakeRepo) SetMustChangePassword(_ context.Context, id uuid.UUID, mustChange bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k, s := range r.sessions {
+		if s.ID == id {
+			s.MustChangePassword = mustChange
+			r.sessions[k] = s
+			return nil
+		}
+	}
+	return apperr.ErrNotFound
+}
+
 func (r *fakeRepo) RevokeBySSO(context.Context, uuid.UUID, string) error { return nil }
 
 func (r *fakeRepo) DeleteExpired(context.Context, time.Time) (int64, error) { return 0, nil }
