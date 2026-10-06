@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 
-import { ApiError, validateClientId, validateRedirectURI } from '@yggauth/shared'
+import { validateClientId, validateRedirectURI, errorBanner, backToTop, type ErrorBanner } from '@yggauth/shared'
 
 import { useAdminStore } from '../stores/admin'
+import CopyableText from '../components/CopyableText.vue'
+import EmptyState from '../components/EmptyState.vue'
+import ErrorAlert from '../components/ErrorAlert.vue'
 
 interface ClientRow {
   id: string
@@ -20,8 +23,10 @@ interface ClientRow {
 const store = useAdminStore()
 const items = ref<ClientRow[]>([])
 const loading = ref(false)
-const banner = ref('')
-const secretBanner = ref('')
+const banner = ref<ErrorBanner | null>(null)
+/** 刚生成的密钥。展示与标题分开存:密钥本身要交给复制组件,不能混进一句话里。 */
+const secret = ref('')
+const secretTitle = ref('')
 
 const creating = ref(false)
 const submitting = ref(false)
@@ -40,11 +45,14 @@ onMounted(load)
 
 async function load(): Promise<void> {
   loading.value = true
+  // 每次刷新都先清:否则上一次的报错会一直挂在新列表上方,
+  // 看起来像「这次也没查出来」。
+  banner.value = null
   try {
     const data = await store.api.get<{ items: ClientRow[] }>('/api/admin/clients')
     items.value = data.items
   } catch (err) {
-    banner.value = err instanceof ApiError ? err.message : '查询失败'
+    banner.value = errorBanner(err, '查询失败')
   } finally {
     loading.value = false
   }
@@ -58,9 +66,25 @@ function resetForm(): void {
   formErrors.redirect_uri = ''
 }
 
+/**
+ * 弹窗的「确定」在 a-modal 的 footer 上,并不在 <a-form> 内部 ——
+ * 它提交不了这个表单,回车也就发不出 submit。这里补上「输入框里回车 = 确定」,
+ * 与点「创建」完全等价;`.exact` 放过带修饰键的组合,textarea 的回车留给换行。
+ *
+ * 事件要从模板里显式传进来:带修饰符的处理器会被编译成
+ * `$event => submitOnEnter(create)` —— 那样只会造出一个闭包再丢掉,函数体永远不执行。
+ */
+function submitOnEnter(fn: () => Promise<void>, e: KeyboardEvent): void {
+  if (submitting.value) return
+  if ((e.target as HTMLElement | null)?.tagName === 'TEXTAREA') return
+  e.preventDefault()
+  void fn()
+}
+
 async function create(): Promise<void> {
-  banner.value = ''
-  secretBanner.value = ''
+  banner.value = null
+  secret.value = ''
+  secretTitle.value = ''
 
   formErrors.client_id = validateClientId(form.client_id).message
   const uris = form.redirect_uris
@@ -86,60 +110,87 @@ async function create(): Promise<void> {
     })
 
     // 密钥只在创建响应里出现一次,关掉弹窗就再也拿不到了。
-    // 必须在用户看得见的地方说清楚,而不是默默丢进剪贴板。
-    secretBanner.value = data.client_secret
-      ? `客户端密钥(只显示这一次,请立即保存):${data.client_secret}`
-      : ''
+    // 必须摆在一个能直接复制的地方,而不是指望用户手抄几十个字符。
+    secret.value = data.client_secret ?? ''
+    secretTitle.value = '客户端密钥已生成,只显示这一次,请立即保存'
     creating.value = false
     resetForm()
     await load()
   } catch (err) {
-    banner.value = err instanceof ApiError ? err.message : '创建失败'
+    banner.value = errorBanner(err, '创建失败')
   } finally {
     submitting.value = false
   }
 }
 
 async function rotate(client: ClientRow): Promise<void> {
-  banner.value = ''
-  secretBanner.value = ''
+  banner.value = null
+  secret.value = ''
+  secretTitle.value = ''
   try {
     const data = await store.api.post<{ client_secret: string }>(
       `/api/admin/clients/${encodeURIComponent(client.id)}/rotate-secret`,
       {},
     )
-    secretBanner.value = `新密钥(旧密钥已立即失效,只显示这一次):${data.client_secret}`
+    secret.value = data.client_secret
+    secretTitle.value = '新密钥已生成,旧密钥已立即失效,只显示这一次'
   } catch (err) {
-    banner.value = err instanceof ApiError ? err.message : '轮换失败'
+    banner.value = errorBanner(err, '轮换失败')
   }
 }
 
 async function remove(client: ClientRow): Promise<void> {
-  banner.value = ''
+  banner.value = null
+  // 顺手收掉密钥条:它属于刚被删掉的客户端,留着只会让人复制一个已失效的串
+  secret.value = ''
+  secretTitle.value = ''
   try {
     await store.api.delete(`/api/admin/clients/${encodeURIComponent(client.id)}`)
     await load()
   } catch (err) {
-    banner.value = err instanceof ApiError ? err.message : '删除失败'
+    banner.value = errorBanner(err, '删除失败')
   }
 }
 </script>
 
 <template>
   <div class="page">
-    <a-alert v-if="banner" type="error" :message="banner" show-icon style="margin-bottom: 16px" />
-    <a-alert v-if="secretBanner" type="warning" :message="secretBanner" show-icon style="margin-bottom: 16px" />
+    <p class="muted" style="margin-bottom: 16px">
+      这里登记要接入本站的第三方应用(OAuth2/OIDC 客户端)。对方拿 client_id 与密钥换令牌;
+      排查接入失败时,先在下方核对回调地址与 PKCE 配置是否和对方一致。
+    </p>
 
-    <a-card
-      title="OIDC 客户端"
->
+    <ErrorAlert :banner="banner" />
+    <a-alert v-if="secret" type="warning" show-icon style="margin-bottom: 16px">
+      <template #message>{{ secretTitle }}</template>
+      <template #description>
+        <CopyableText :value="secret" label="密钥" :boxed="false" />
+      </template>
+    </a-alert>
+
+    <a-card title="OIDC 客户端">
       <template #extra>
         <a-button type="primary" @click="creating = true">新建客户端</a-button>
       </template>
       <a-spin :spinning="loading">
-        <a-table :data-source="items" row-key="id" :pagination="{ pageSize: 20 }">
-          <a-table-column key="id" title="客户端标识" />
-          <a-table-column key="name" title="名称" />
+        <!-- 换页是一次整屏数据替换:回顶,否则视线停在分页器旁,看到的是新页的末尾 -->
+        <a-table
+          :scroll="{ x: 1200 }"
+          :data-source="items"
+          row-key="id"
+          :pagination="{ pageSize: 20 }"
+          @change="() => backToTop()"
+        >
+          <template #emptyText>
+            <EmptyState
+              description="还没有登记客户端"
+              hint="第三方应用要让用户用本站账号登录时,先在这里创建一个客户端,再把 client_id 与密钥交给对方接入。"
+            />
+          </template>
+          <!-- data-index 不能省:只写 key 不写 data-index 又不给插槽时,
+               Ant Design Vue 会渲染空单元格,看起来像数据没查出来。 -->
+          <a-table-column key="id" data-index="id" title="客户端标识" />
+          <a-table-column key="name" data-index="name" title="名称" />
           <a-table-column key="redirect_uris" title="回调地址">
             <template #default="{ record }">
               <div v-for="uri in record.redirect_uris" :key="uri"><code>{{ uri }}</code></div>
@@ -181,7 +232,7 @@ async function remove(client: ClientRow): Promise<void> {
       :width="620"
       @ok="create"
     >
-      <a-form layout="vertical">
+      <a-form layout="vertical" @submit.prevent="create" @keydown.enter.exact.prevent="submitOnEnter(create, $event)">
         <a-form-item
           label="客户端标识(client_id)"
           required

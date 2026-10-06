@@ -89,7 +89,7 @@ web: ## 构建两个前端应用(account-web + admin-web)
 	cd web && pnpm install --frozen-lockfile && pnpm build
 
 .PHONY: web-dev
-web-dev: ## 前端开发服务器(Vite,3001 端口,代理到后端 3000)
+web-dev: ## 前端开发服务器(Vite:账号站 5173、后台 5174,代理到后端 3000)
 	cd web && pnpm install && pnpm dev
 
 .PHONY: web-lint

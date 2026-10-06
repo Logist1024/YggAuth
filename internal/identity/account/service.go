@@ -45,8 +45,25 @@ type Config struct {
 	Invitations *InvitationStore
 	// Mailer 发送验证与重置邮件。为 nil 时只记录日志不发送。
 	Mailer Mailer
+	// HideVerifyURL 为 true 时,注册响应**不再**内联验证链接。
+	//
+	// 只有「邮件确实会送到收件人手里」的部署(传输为 smtp)才设它:
+	// 那种情况下令牌必须只走邮件。同一份令牌再从 HTTP 响应里递一遍,
+	// 等于谁替别人注册、谁就顺手拿到验证令牌 —— 「证明你拥有这个邮箱」
+	// 也就无从谈起。console 传输与没配 Mailer 的部署里邮件到不了任何人,
+	// 链接是唯一走得通的路,所以默认(零值)仍然内联。
+	HideVerifyURL bool
+	// PublicBaseURL 是对外完整基址,邮件里的验证/重置链接由它拼。
+	// 邮件是唯一一个「把 URL 交给收件人自己去点」的渠道:正文里必须
+	// 是完整可点的绝对地址,相对地址或占位符对收件人毫无意义 —— 而
+	// 服务端日志里一切正常,坏了没人发现。部署侧已强制 PUBLIC_BASE_URL。
+	PublicBaseURL string
 	// Auditor 写审计事件。为 nil 时跳过。
 	Auditor Auditor
+	// VerifyCooldown 是两次重发验证邮件之间的最小间隔。0 表示不限制。
+	VerifyCooldown time.Duration
+	// VerifyDailyLimit 是单账号每日重发上限。0 表示不限制。
+	VerifyDailyLimit int
 }
 
 // LeakChecker 检查密码是否出现在公开泄露库中。
@@ -128,8 +145,15 @@ type RegisterInput struct {
 // RegisterOutput 是注册结果。
 type RegisterOutput struct {
 	Account domain.Account
-	// VerifyToken 明文令牌,只在注册响应里出现一次,库里只存它的哈希
+	// VerifyToken 是明文令牌,库里只存它的哈希。handler 不再拿它拼响应,
+	// 拼链接的活儿在 Register 里做完(见 VerifyURL)。
 	VerifyToken string
+	// VerifyURL 是可点的验证链接绝对地址。
+	//
+	// 只有邮件投递不出去的部署才填(见 Config.HideVerifyURL):
+	// 那时它是用户唯一能完成验证的路;投递得出时留空,
+	// 令牌就只从邮件这一条路出去。
+	VerifyURL string
 }
 
 // ErrInviteRequired 表示该部署要求邀请码注册。
@@ -222,6 +246,16 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (RegisterOutpu
 		return RegisterOutput{}, err
 	}
 
+	// 注册这一刻就发验证邮件。此前只签发令牌、不发信,于是响应里的
+	// verify_url 成了唯一出口 —— 邮箱验证等于「谁先注册谁拥有它」。
+	// 与重发/改邮箱两处同一套:发信失败不回滚注册(账号已经建好),
+	// 运维从日志里看得见这次投递。
+	if s.cfg.Mailer != nil {
+		if serr := s.cfg.Mailer.Send(ctx, s.verifyEmailMessage(acc.Email, acc.Username, token)); serr != nil {
+			s.logger.Error("send verify email failed", "account_id", acc.ID, "error", serr)
+		}
+	}
+
 	s.audit(ctx, Event{
 		AccountID:  &acc.ID,
 		Actor:      domain.AuditActorAccount(acc.ID),
@@ -233,7 +267,24 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (RegisterOutpu
 		UserAgent:  in.UserAgent,
 	})
 
-	return RegisterOutput{Account: acc, VerifyToken: token}, nil
+	out := RegisterOutput{Account: acc, VerifyToken: token}
+	if !s.cfg.HideVerifyURL {
+		out.VerifyURL = s.baseURL() + "/verify-email?token=" + token
+	}
+	return out, nil
+}
+
+// verifyEmailMessage 拼「验证邮箱」这封信。
+//
+// 注册与重发两处共用:这两封信的措辞必须一模一样 ——
+// 用户分不清哪封是第一次、哪封是再发一次,也不该需要分清。
+func (s *Service) verifyEmailMessage(to, username, token string) Message {
+	return Message{
+		To:      to,
+		Subject: "验证你的邮箱",
+		Text: fmt.Sprintf("你好 %s,\n\n点击以下链接验证邮箱(有效期 %s):\n%s/verify-email?token=%s\n\n如果这不是你的操作,忽略这封邮件即可。\n",
+			username, s.cfg.EmailTokenTTL, s.baseURL(), token),
+	}
 }
 
 // AuthenticateInput 是登录入参。
@@ -389,9 +440,27 @@ const (
 )
 
 // TokenStore 存取邮箱令牌。
+//
+// CountSince 与 LastCreatedAt 只服务重发邮件的限流判断:
+// 拿不到「上次什么时候发的、今天发了几封」就只能无脑放行,
+// 重发按钮会变成一个邮件轰炸器。
 type TokenStore interface {
 	Create(ctx context.Context, accountID uuid.UUID, purpose, plain string, expiresAt time.Time) error
 	Consume(ctx context.Context, purpose, plain string) (uuid.UUID, error)
+	// CountSince 统计某用途在 since 之后的签发次数。
+	CountSince(ctx context.Context, accountID uuid.UUID, purpose string, since time.Time) (int64, error)
+	// LastCreatedAt 返回某用途最近一次签发时间;从未签发过时 ok 为假。
+	LastCreatedAt(ctx context.Context, accountID uuid.UUID, purpose string) (time.Time, bool, error)
+}
+
+// baseURL 返回对外基址,用于拼邮件正文里的链接。
+//
+// 三封邮件(验证、重置、改邮箱)共用这一处:它们过去都写死了一个
+// 从未被任何代码替换的 "{{BASE_URL}}" 占位符,于是每一封发出去的
+// 邮件里都是一条点不开的死链 —— 收件人看不懂,服务端日志却一路正常。
+// 现在统一从这里取,截掉结尾的斜杠,免得拼出 //verify-email 这种地址。
+func (s *Service) baseURL() string {
+	return strings.TrimRight(s.cfg.PublicBaseURL, "/")
 }
 
 // issueEmailToken 生成明文令牌并存哈希。
@@ -439,6 +508,78 @@ func (s *Service) VerifyEmail(ctx context.Context, in VerifyEmailInput) (domain.
 	return acc, nil
 }
 
+// ResendVerificationInput 是重发验证邮件的入参。
+type ResendVerificationInput struct {
+	AccountID uuid.UUID
+	IP        string
+	UserAgent string
+}
+
+// ResendVerification 给当前账号重发一封邮箱验证邮件。
+//
+// 无论邮箱是否已验证、是否被冷却与每日上限拦下,都返回成功 ——
+// 这个接口只暴露给已登录本人,但它仍不该被用来探测
+// 「我这个账号到底验证没有」。限流与否只体现在日志里。
+//
+// 令牌存储的 Create 会作废同用途的旧令牌,所以用户连点两次
+// 「重发」之后,只有最后一封邮件里的链接还能用。
+func (s *Service) ResendVerification(ctx context.Context, in ResendVerificationInput) error {
+	acc, err := s.repo.GetByID(ctx, in.AccountID)
+	if err != nil {
+		return err
+	}
+	if acc.EmailVerified {
+		return nil
+	}
+
+	if s.cfg.VerifyCooldown > 0 {
+		last, ok, err := s.tokens.LastCreatedAt(ctx, acc.ID, PurposeVerifyEmail)
+		if err != nil {
+			return err
+		}
+		if ok && s.clock.Now().Sub(last) < s.cfg.VerifyCooldown {
+			s.logger.Info("verify email resend throttled", "account_id", acc.ID, "reason", "cooldown")
+			return nil
+		}
+	}
+	if s.cfg.VerifyDailyLimit > 0 {
+		n, err := s.tokens.CountSince(ctx, acc.ID, PurposeVerifyEmail, s.clock.Now().Add(-24*time.Hour))
+		if err != nil {
+			return err
+		}
+		if int(n) >= s.cfg.VerifyDailyLimit {
+			s.logger.Warn("verify email resend throttled", "account_id", acc.ID, "reason", "daily_limit")
+			return nil
+		}
+	}
+
+	token, err := s.issueEmailToken(ctx, acc.ID, PurposeVerifyEmail)
+	if err != nil {
+		return err
+	}
+
+	if s.cfg.Mailer != nil {
+		msg := s.verifyEmailMessage(acc.Email, acc.Username, token)
+		if err := s.cfg.Mailer.Send(ctx, msg); err != nil {
+			// 发送失败不报错给调用方:同上,不能借此判断账号状态。
+			// 运维从日志与下方审计事件里能看到这次投递。
+			s.logger.Error("send verify email failed", "account_id", acc.ID, "error", err)
+		}
+	}
+
+	s.audit(ctx, Event{
+		AccountID:  &acc.ID,
+		Actor:      domain.AuditActorAccount(acc.ID),
+		Action:     "account.email_verification_resent",
+		TargetType: "account",
+		TargetID:   acc.ID.String(),
+		Outcome:    domain.OutcomeSuccess,
+		IP:         in.IP,
+		UserAgent:  in.UserAgent,
+	})
+	return nil
+}
+
 // RequestPasswordResetInput 是发起密码重置的入参。
 type RequestPasswordResetInput struct {
 	Email     string
@@ -471,7 +612,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, in RequestPasswordRe
 			To:      acc.Email,
 			Subject: "重置你的密码",
 			Text: fmt.Sprintf("你好 %s,\n\n点击以下链接重置密码(有效期 %s):\n%s/reset-password?token=%s\n\n如果这不是你的操作,忽略这封邮件即可。\n",
-				acc.Username, s.cfg.EmailTokenTTL, "{{BASE_URL}}", token),
+				acc.Username, s.cfg.EmailTokenTTL, s.baseURL(), token),
 		}
 		if err := s.cfg.Mailer.Send(ctx, msg); err != nil {
 			// 邮件发送失败不能泄露账号是否存在,同样按成功处理
@@ -608,7 +749,7 @@ func (s *Service) UpdateProfile(ctx context.Context, in UpdateProfileInput) (dom
 			if serr := s.cfg.Mailer.Send(ctx, Message{
 				To:      updated.Email,
 				Subject: "验证你的新邮箱",
-				Text:    fmt.Sprintf("你好 %s,\n\n请验证你的新邮箱:\n%s/verify-email?token=%s\n", updated.Username, "{{BASE_URL}}", token),
+				Text:    fmt.Sprintf("你好 %s,\n\n请验证你的新邮箱:\n%s/verify-email?token=%s\n", updated.Username, s.baseURL(), token),
 			}); serr != nil {
 				s.logger.Error("send verify email failed", "account_id", updated.ID, "error", serr)
 			}

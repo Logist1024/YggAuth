@@ -35,7 +35,7 @@ HTTP 状态码**同时**正确设置(如 400/401/403/404/429/500),前端以 `cod
 | 10001 | 400 | 参数校验失败 |
 | 10002 | 429 | 请求过于频繁 |
 | 10003 | 500 | 服务器内部错误 |
-| 20001 | 401 | 未认证或凭证无效 |
+| 20001 | 401 | 未认证(没带凭据) |
 | 20002 | 401 | 邮箱或密码错误 |
 | 20003 | 403 | 账号被禁用 |
 | 20004 | 409 | 邮箱已注册 |
@@ -44,6 +44,7 @@ HTTP 状态码**同时**正确设置(如 400/401/403/404/429/500),前端以 `cod
 | 20007 | 400 | 密码不符合策略 |
 | 20008 | 400 | 令牌无效或已过期 |
 | 20009 | 409 | 邮箱未验证 |
+| 20012 | 401 | 登录态已过期,请重新登录(带了已登出/过期的凭据) |
 | 30001 | 403 | 权限不足 |
 | 30002 | 403 | 需要更高权限 |
 | 40001 | 400 | OIDC 参数错误 |
@@ -83,6 +84,7 @@ HTTP 状态码**同时**正确设置(如 400/401/403/404/429/500),前端以 `cod
 | POST | `/api/auth/password/reset` | 公开 | 重置密码 |
 | POST | `/api/auth/email/verify` | 公开 | 验证邮箱 |
 | POST | `/api/auth/email/resend` | 会话 | 重发验证邮件 |
+| GET | `/api/auth/policy` | 公开 | 注册/密码校验策略(是否需邀请码、密码长度上限) |
 
 **注册请求**
 ```json
@@ -94,6 +96,21 @@ POST /api/auth/register
   "invite_code": "optional"
 }
 ```
+
+**注册成功响应**
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "account": { "id": "...", "username": "player_one", "email": "user@example.com" },
+    "verify_url": "https://auth.example.com/verify-email?token=..."
+  }
+}
+```
+
+注册这一刻后端就发验证邮件。`verify_url` **只在邮件投递不出去的部署里出现**(`MAILER_TRANSPORT=console`、或压根没配 `Mailer`):那时它是完成邮箱验证唯一的路。
+`smtp` 部署只回 `account` —— 令牌只从邮件这一条路出去,再从响应里递一份,替别人注册的人顺手就能拿到它(见 `account.Config.HideVerifyURL`)。
 
 **登录请求**
 ```json
@@ -129,6 +146,17 @@ POST /api/auth/login
 | GET | `/api/account/sessions` | 会话 | 活跃会话列表 |
 | DELETE | `/api/account/sessions/:id` | 会话 | 踢掉指定会话 |
 | GET | `/api/account/audit` | 会话 + `account:read` | 我的操作记录 |
+
+**操作记录查询参数**
+
+`limit` / `offset` 翻页,`action`(`account.login` 之类)与 `outcome`(`success` / `failure`)
+筛选,可组合使用。
+
+**重发验证邮件**
+
+`POST /api/auth/email/resend` 不带请求体。已验证过的账号、或距上次发送不到
+`mail.verify_cooldown_seconds`、或当日超过 `mail.verify_daily_limit` 时,仍返回成功
+(不泄露账号状态),只是不发信 —— 与注册接口同一套防枚举思路。
 
 ## 三、OIDC API
 
@@ -309,6 +337,7 @@ GET /mc/avatar/<uuidOrName>?size=64&hd=false
 | GET | `/api/admin/menus` | 登录即可 | 按权限点过滤后的菜单 |
 | GET | `/api/admin/dashboard` | 登录即可 | 统计数据 |
 | GET | `/api/admin/accounts` | `account:read` | 账号列表 |
+| GET | `/api/admin/accounts/:id/roles` | `account:read` | 该账号已授予的角色 |
 | PATCH | `/api/admin/accounts/:id` | `account:write` | 修改账号状态等 |
 | GET | `/api/admin/roles` | `rbac:read` | 角色列表 |
 | POST | `/api/admin/roles` | `rbac:write` | 创建角色 |
@@ -321,15 +350,17 @@ GET /mc/avatar/<uuidOrName>?size=64&hd=false
 | GET | `/api/admin/audit/export` | `audit:export` | 导出 CSV |
 | GET | `/api/admin/invitations` | `rbac:write` | 邀请列表 |
 | POST | `/api/admin/invitations` | `rbac:write` | 创建邀请码 |
+| POST | `/api/admin/invitations/:id/revoke` | `rbac:write` | 撤销邀请码(幂等,重复调用同样返回 `{"revoked":true}`) |
 | GET | `/api/admin/clients` | `oidc:client:read` | OIDC 客户端列表 |
 | POST | `/api/admin/clients` | `oidc:client:write` | 登记客户端 |
 | PATCH | `/api/admin/clients/:id` | `oidc:client:write` | 修改客户端 |
 | POST | `/api/admin/clients/:id/rotate-secret` | `oidc:client:write` | 轮换密钥 |
-| POST | `/api/admin/keys/rotate` | `oidc:client:write` | 轮换 OIDC 签名密钥 |
-| GET | `/api/admin/mc/profiles` | `minecraft:profile:read` | 玩家档案 |
-| PATCH | `/api/admin/mc/profiles/:id` | `minecraft:profile:write` | 改名/封禁 |
-| GET | `/api/admin/mc/textures` | `minecraft:texture:read` | 材质库 |
-| DELETE | `/api/admin/mc/textures/:hash` | `minecraft:texture:write` | 删除材质 |
+| GET | `/api/admin/signing-keys` | `oidc:client:read` | 签名密钥列表(kid、状态、退役时间) |
+| POST | `/api/admin/signing-keys/rotate` | `oidc:client:write` | 轮换 OIDC 签名密钥 |
+| GET | `/api/admin/mc/profiles` | `minecraft:profile:read` | 玩家档案列表(`search` 子串匹配 / `limit`≤100 / `offset`) |
+| PATCH | `/api/admin/mc/profiles/:id` | `minecraft:profile:write` | **未实现** —— 改名/封禁没有管理端入口,页面上只做查询 |
+| GET | `/api/admin/mc/textures` | `minecraft:texture:read` | 材质列表(`kind` = `skin`\|`cape` / `limit`≤100 / `offset`) |
+| DELETE | `/api/admin/mc/textures/:hash` | `minecraft:texture:write` | **未实现** —— 材质回收还没有做 |
 | GET | `/api/admin/settings` | `setting:read` | 应用配置 |
 | PATCH | `/api/admin/settings` | `setting:write` | 修改配置 |
 

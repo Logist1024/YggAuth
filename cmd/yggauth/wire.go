@@ -64,6 +64,13 @@ func buildDeps(cfg *config.Config, logger *slog.Logger, pool *db.Pool) transport
 			EmailTokenTTL:       cfg.Auth.EmailTokenTTL,
 			RegistrationMode:    cfg.Auth.RegistrationMode,
 			Mailer:              mailer.New(mailerCfg(cfg), logger),
+			// 邮件真的会送到收件人手里时,验证令牌只从邮件这一条路出去,
+			// 注册响应不再内联 verify_url(见 account.Config.HideVerifyURL)
+			HideVerifyURL: cfg.Mail.Transport == "smtp",
+			// 邮件里的验证/重置链接用它拼(BaseURL 已去掉结尾斜杠)
+			PublicBaseURL:    cfg.App.BaseURL(),
+			VerifyCooldown:   cfg.Mail.VerifyCooldown,
+			VerifyDailyLimit: cfg.Mail.VerifyDailyLimit,
 		},
 		Session: session.Config{
 			IdleTTL:        cfg.Auth.SessionIdleTTL,

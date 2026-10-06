@@ -28,11 +28,23 @@ export default defineConfig({
     // 带上它等于把源码发出去。
     sourcemap: false,
     chunkSizeWarningLimit: 1500,
+    // 同账号站:依赖只随升级变,业务代码随每次改动变;分开才能让重复访问
+    // 只重新下载业务 chunk,而不是整个 1.5MB 的 vendor。
+    rollupOptions: {
+      output: {
+        manualChunks(id: string) {
+          if (id.includes('node_modules/')) return 'vendor'
+        },
+      },
+    },
   },
   server: {
     port: 5174,
+    // 同 account 应用:后端在 3000(docs/08-deployment.md 第九节)。
     proxy: {
-      '/api': 'http://127.0.0.1:8080',
+      '/api': 'http://127.0.0.1:3000',
+      '/oauth': 'http://127.0.0.1:3000',
+      '/mc': 'http://127.0.0.1:3000',
     },
   },
 })

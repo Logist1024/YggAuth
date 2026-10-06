@@ -293,7 +293,7 @@ make dev
 cd web && pnpm dev
 ```
 
-开发时前端跑 Vite dev server(3001),代理 `/api` `/oauth` `/mc` 到后端 3000,免去每改前端就重建二进制。
+开发时前端跑 Vite dev server —— 账号站 `http://localhost:5173`、后台 `http://localhost:5174/admin/`（端口以 `web/apps/*/vite.config.ts` 为准），代理 `/api` `/oauth` `/mc` 到后端 3000，免去每改前端就重建二进制。
 
 **SSO 本地测试两种做法**:
 

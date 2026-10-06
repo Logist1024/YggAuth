@@ -29,6 +29,7 @@ import (
 	"github.com/yggauth/yggauth/internal/platform/apperr"
 
 	"github.com/yggauth/yggauth/internal/platform/db"
+	"github.com/yggauth/yggauth/internal/platform/db/query"
 	"github.com/yggauth/yggauth/internal/platform/httpx"
 	"github.com/yggauth/yggauth/internal/platform/keys"
 )
@@ -91,6 +92,7 @@ func (h *Handler) Mount(r chi.Router) {
 		r.Get("/dashboard", h.Dashboard)
 
 		r.With(httpx.RequirePermission(PermAccountRead)).Get("/accounts", h.ListAccounts)
+		r.With(httpx.RequirePermission(PermAccountRead)).Get("/accounts/{accountID}/roles", h.ListAccountRoles)
 		r.With(httpx.RequirePermission(PermAccountWrite)).Patch("/accounts/{accountID}", h.UpdateAccount)
 
 		r.With(httpx.RequirePermission(PermRBACRead)).Get("/roles", h.ListRoles)
@@ -106,6 +108,7 @@ func (h *Handler) Mount(r chi.Router) {
 
 		r.With(httpx.RequirePermission(PermRBACWrite)).Get("/invitations", h.ListInvitations)
 		r.With(httpx.RequirePermission(PermRBACWrite)).Post("/invitations", h.CreateInvitation)
+		r.With(httpx.RequirePermission(PermRBACWrite)).Post("/invitations/{invitationID}/revoke", h.RevokeInvitation)
 
 		r.With(httpx.RequirePermission(PermSettingRead)).Get("/settings", h.GetSettings)
 		r.With(httpx.RequirePermission(PermOIDCClientRead)).Get("/clients", h.ListOIDCClients)
@@ -115,6 +118,11 @@ func (h *Handler) Mount(r chi.Router) {
 		r.With(httpx.RequirePermission(PermOIDCClientRead)).Get("/signing-keys", h.ListSigningKeys)
 		r.With(httpx.RequirePermission(PermOIDCClientWrite)).Post("/signing-keys/rotate", h.RotateSigningKey)
 		r.With(httpx.RequirePermission(PermSettingWrite)).Patch("/settings", h.UpdateSetting)
+
+		// Minecraft 侧的后台只读列表。菜单里早就有这两项
+		// (见 allMenus),此前没挂路由 —— 点进去只能看到占位页。
+		r.With(httpx.RequirePermission(PermMCProfileRead)).Get("/mc/profiles", h.ListMCProfiles)
+		r.With(httpx.RequirePermission(PermMCTextureRead)).Get("/mc/textures", h.ListMCTextures)
 	})
 }
 
@@ -179,6 +187,7 @@ var allMenus = []menuItem{
 	{Key: "audit", Path: "/audit", Title: "审计日志", Icon: "file-search", Group: "安全与审计", Permission: PermAuditRead},
 
 	{Key: "clients", Path: "/clients", Title: "OIDC 客户端", Icon: "api", Group: "应用接入", Permission: PermOIDCClientRead},
+	{Key: "keys", Path: "/keys", Title: "签名密钥", Icon: "key", Group: "应用接入", Permission: PermOIDCClientRead},
 
 	{Key: "mc_profiles", Path: "/mc/profiles", Title: "玩家档案", Icon: "idcard", Group: "Minecraft", Permission: "minecraft:profile:read"},
 	{Key: "mc_textures", Path: "/mc/textures", Title: "材质库", Icon: "picture", Group: "Minecraft", Permission: "minecraft:texture:read"},
@@ -319,6 +328,37 @@ func (h *Handler) UpdateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.OK(w, map[string]any{"account": accountView(acc)})
+}
+
+// ListAccountRoles 返回某个账号当前拥有的角色。
+//
+// 授予与撤销走 /roles/grant、/roles/revoke,但「他现在到底有什么角色」
+// 也得能看 —— 没有这个端点,详情抽屉只能显示一个空列表,
+// 管理员无从判断刚才那下授予是否生效。
+//
+// 读权限用 account:read 而不是 rbac:read:入口是账号管理页,
+// 那里按 account:read 过滤。让只有账号读权限的管理员打开抽屉
+// 就撞一个 403,比看不到角色更让人困惑。
+func (h *Handler) ListAccountRoles(w http.ResponseWriter, r *http.Request) {
+	accountID, err := uuid.Parse(chi.URLParam(r, "accountID"))
+	if err != nil {
+		httpx.Fail(w, apperr.New(apperr.CodeInvalidArgument, "账号 ID 非法"))
+		return
+	}
+
+	roles, err := h.deps.Identity.RBAC.ListAccountRoles(r.Context(), accountID)
+	if err != nil {
+		httpx.Fail(w, err)
+		return
+	}
+
+	out := make([]map[string]any, 0, len(roles))
+	for _, role := range roles {
+		out = append(out, map[string]any{
+			"id": role.ID.String(), "code": role.Code, "name": role.Name,
+		})
+	}
+	httpx.OK(w, map[string]any{"roles": out})
 }
 
 // ListAccounts 分页查询账号。
@@ -542,7 +582,6 @@ func (h *Handler) ListPermissions(w http.ResponseWriter, r *http.Request) {
 
 // ---------------------------------------------------------------- 审计
 
-// SearchAudit 检索审计事件。
 // auditEventDTO 是审计事件的对外形态。
 //
 // 在 Entry 之外补两个解析出来的名字:Actor 存的是 "account:<uuid>"
@@ -557,6 +596,10 @@ type auditEventDTO struct {
 	TargetName string `json:"target_name,omitempty"`
 }
 
+// SearchAudit 检索审计事件。
+//
+// 过滤条件由 auditFilter 统一解析(分页上限、时间窗、动作与结果),
+// 这里只负责查、解析主体名并拼回信封。
 func (h *Handler) SearchAudit(w http.ResponseWriter, r *http.Request) {
 	filter, err := auditFilter(r)
 	if err != nil {
@@ -785,6 +828,54 @@ func (h *Handler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 		"created_at": createdAt.UTC().Format(time.RFC3339),
 		"expires_at": expiry.UTC().Format(time.RFC3339),
 	})
+}
+
+// invitationExistsSQL 判断邀请码是否存在。
+const invitationExistsSQL = `SELECT EXISTS(SELECT 1 FROM identity.invitation WHERE id = $1)`
+
+// RevokeInvitation 撤销邀请码。
+//
+// 撤销是幂等的:已经撤销过的再撤一次同样返回成功,前端重试不该收到
+// 一个「状态其实没变」的错误。撤销后该码立即不可再被用于注册
+// (核销 SQL 的 WHERE 里带 revoked_at IS NULL)。
+// 审计只在真的改了状态那一次写,重复调用不留噪声记录。
+func (h *Handler) RevokeInvitation(w http.ResponseWriter, r *http.Request) {
+	if h.deps.DB == nil {
+		httpx.Fail(w, apperr.New(apperr.CodeUnavailable, "邀请码功能未启用"))
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "invitationID"))
+	if err != nil {
+		httpx.Fail(w, apperr.New(apperr.CodeInvalidArgument, "邀请码 ID 非法"))
+		return
+	}
+
+	n, err := query.New(h.deps.DB).RevokeInvitation(r.Context(), id)
+	if err != nil {
+		httpx.Fail(w, apperr.Newf(apperr.CodeInternal, "撤销邀请码失败: %v", err))
+		return
+	}
+	if n == 0 {
+		// 撤销 SQL 带 revoked_at IS NULL 条件,n==0 既可能是「已撤销」,
+		// 也可能是「根本不存在」,再查一次才分得清。
+		var exists bool
+		if err := h.deps.DB.QueryRow(r.Context(), invitationExistsSQL, id).Scan(&exists); err != nil {
+			httpx.Fail(w, apperr.Newf(apperr.CodeInternal, "查询邀请码失败: %v", err))
+			return
+		}
+		if !exists {
+			httpx.Fail(w, apperr.New(apperr.CodeNotFound, "邀请码不存在"))
+			return
+		}
+		// 已撤销过:幂等成功返回,不补写审计。
+		httpx.OK(w, map[string]any{"revoked": true})
+		return
+	}
+
+	actor := httpx.PrincipalFrom(r.Context())
+	h.auditAdmin(r, actor.AccountID, "invitation.revoked", "invitation", id.String(), nil)
+
+	httpx.OK(w, map[string]any{"revoked": true})
 }
 
 // ---------------------------------------------------------------- 设置

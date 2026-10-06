@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
-import { ApiError } from '@yggauth/shared'
+import { ApiError, formatTime, errorBanner, type ErrorBanner } from '@yggauth/shared'
 
 import { useSessionStore } from '../stores/session'
+import ErrorAlert from '../components/ErrorAlert.vue'
 
 /** 账号状态的显示名。后端存的是枚举值,不该直接甩给用户看。 */
 const STATUS_LABEL: Record<string, string> = {
@@ -31,7 +32,7 @@ const CAPABILITIES = [
 
 const store = useSessionStore()
 const mc = ref<{ id: string; name: string; login_enabled: boolean } | null>(null)
-const mcError = ref('')
+const mcError = ref<ErrorBanner | null>(null)
 const loadingMC = ref(false)
 
 const account = computed(() => store.account)
@@ -43,9 +44,9 @@ onMounted(async () => {
   } catch (err) {
     // 还没在游戏里登录过时没有档案,这是正常状态而不是错误。
     if (err instanceof ApiError && err.status === 404) {
-      mcError.value = ''
+      mcError.value = null
     } else {
-      mcError.value = err instanceof ApiError ? err.message : '查询失败'
+      mcError.value = errorBanner(err, '查询失败')
     }
   } finally {
     loadingMC.value = false
@@ -86,7 +87,7 @@ onMounted(async () => {
               </a-tag>
             </a-descriptions-item>
             <a-descriptions-item label="注册时间">
-              {{ account ? new Date(account.created_at).toLocaleString() : '' }}
+              {{ account ? formatTime(account.created_at) : '' }}
             </a-descriptions-item>
           </a-descriptions>
           <div style="margin-top: 16px">
@@ -98,7 +99,7 @@ onMounted(async () => {
       <a-col :span="10">
         <a-card title="Minecraft 档案">
           <a-spin :spinning="loadingMC" />
-          <a-alert v-if="mcError" type="error" :message="mcError" show-icon />
+          <ErrorAlert :banner="mcError" />
 
           <template v-if="!mcError">
             <a-descriptions v-if="mc" bordered :column="1">
@@ -112,7 +113,15 @@ onMounted(async () => {
                 </a-tag>
               </a-descriptions-item>
             </a-descriptions>
-            <a-empty v-else description="还没有绑定 Minecraft 档案。在游戏里用本服务登录一次即可自动创建。" />
+            <!--
+              空态要等加载结束再出现。此前它和转圈同时显示,
+              每个还没进过服的新用户都会先读到一句「还没有绑定」——
+              那是查询还没回来,不是查出来没有。
+            -->
+            <a-empty
+              v-else-if="!loadingMC"
+              description="还没有绑定 Minecraft 档案。在游戏里用本服务登录一次即可自动创建。"
+            />
           </template>
 
           <div style="margin-top: 16px">

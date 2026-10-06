@@ -141,7 +141,7 @@ const HINTS: Readonly<Record<number, string>> = {
   [ErrCode.ACCOUNT_LOCKED]: '请等待锁定时间结束后再试,或联系管理员解锁。',
   [ErrCode.WEAK_PASSWORD]: '请按页面提示调整密码。',
   [ErrCode.INVALID_TOKEN]: '该链接已失效,请重新获取。',
-  [ErrCode.EMAIL_UNVERIFIED]: '请先点击注册邮件里的验证链接完成激活。',
+  [ErrCode.EMAIL_UNVERIFIED]: '请先用注册完成时的验证链接激活邮箱;那一页已经关掉的话,请联系管理员处理。',
   [ErrCode.INVITE_REQUIRED]: '请向管理员索取邀请码。',
   [ErrCode.INVITE_INVALID]: '请确认邀请码是否输入正确,或向管理员索取新的邀请码。',
   [ErrCode.SESSION_EXPIRED]: '请重新登录。',

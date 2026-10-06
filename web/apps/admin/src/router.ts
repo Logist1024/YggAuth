@@ -24,12 +24,16 @@ declare module 'vue-router' {
 }
 
 const routes: RouteRecordRaw[] = [
-  { path: '/login', name: 'login', component: () => import('./views/LoginView.vue') },
+  // 登录页单独成路由(不在 AdminLayout 里),所以它自己带 title ——
+  // 不带的话标签页会一直停在 index.html 的默认标题。
+  { path: '/login', name: 'login', meta: { title: '登录' }, component: () => import('./views/LoginView.vue') },
   {
     path: '/',
     component: () => import('./layouts/AdminLayout.vue'),
     meta: { requireAuth: true },
     children: [
+      // /admin/ 空路径直接进仪表盘:没有这条,访问根路径会落到空布局白屏。
+      { path: '', redirect: { name: 'dashboard' } },
       {
         path: 'dashboard',
         name: 'dashboard',
@@ -92,7 +96,12 @@ const routes: RouteRecordRaw[] = [
       },
     ],
   },
-  { path: '/:pathMatch(.*)*', name: 'not-found', component: () => import('./views/NotFoundView.vue') },
+  {
+    path: '/:pathMatch(.*)*',
+    name: 'not-found',
+    meta: { title: '页面不存在' },
+    component: () => import('./views/NotFoundView.vue'),
+  },
 ]
 
 export const router = createRouter({
@@ -101,9 +110,26 @@ export const router = createRouter({
   // 结果是每条路由都落到 not-found。
   history: createWebHistory('/admin'),
   routes,
+  /**
+   * 导航后滚到哪。
+   *
+   * 少了它,在长列表(审计日志、账号管理)翻页或切页时,
+   * 浏览器会把新页面停在原来的滚动位置 —— 用户看到的是
+   * 「点了没反应」或者直接是页面中段。前进/后退则还原原位,
+   * 否则「退回上一页」还得重新往下翻。
+   */
+  scrollBehavior(_to, _from, savedPosition) {
+    return savedPosition ?? { top: 0 }
+  },
 })
 
 router.beforeEach(async (to) => {
+  // 先设标签页标题:下面有提前 return(未登录跳转),
+  // 放在末尾会让登录页停在 index.html 的默认标题。
+  if (to.meta.title) {
+    document.title = `${to.meta.title} · YggAuth 管理后台`
+  }
+
   // 登录页本身不需要会话。
   if (!to.meta.requireAuth && to.name !== 'not-found') {
     return true
@@ -121,11 +147,13 @@ router.beforeEach(async (to) => {
   if (required && !store.has(required)) {
     // 跳到仪表盘而不是 403 页:管理员多半是点错了链接,
     // 给一个「回到首页」比给一堵墙有用。
+    //
+    // 但不能一声不吭 —— 静默跳转在用户眼里就是「点了菜单没反应」,
+    // 于是再点一次、再点一次。原因写进 store.notice,由 AdminLayout
+    // 在内容区顶部渲染(与登录页那条同源),用户点 × 关掉即可。
+    store.notice = `你没有查看「${to.meta.title ?? required}」的权限,已回到仪表盘。`
     return { name: 'dashboard' }
   }
 
-  if (to.meta.title) {
-    document.title = `${to.meta.title} · YggAuth 管理后台`
-  }
   return true
 })

@@ -61,13 +61,17 @@ func SessionAuth(auth SessionAuthenticator, cfg AuthConfig) func(http.Handler) h
 				// 浏览器还留着旧 cookie)不能当作致命错误 —— 它
 				// 与「没带凭据」在语义上是一样的:主体未知。
 				//
+				// 但两者对用户并不一样,所以给下游留一面小旗:
+				// 带着死凭据来的请求,RequireAuth 回 20012
+				// 「登录态已过期,请重新登录」,空手来的才是 20001。
+				//
 				// 把它当成未认证继续放行,理由与上面 `token == ""`
 				// 分支一致:公开接口(登录/注册)必须能跑,
 				// 受保护接口另有 RequireAuth 会基于 nil 主体返回 401。
 				//
 				// 这里不主动清 cookie —— 登录成功后的 Set-Cookie
 				// 会用同名同域覆盖旧值,无须多写一次响应头。
-				next.ServeHTTP(w, r)
+				next.ServeHTTP(w, r.WithContext(httpx.WithRejectedCredential(r.Context())))
 				return
 			}
 

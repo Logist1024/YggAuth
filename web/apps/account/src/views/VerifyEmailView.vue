@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { ApiError } from '@yggauth/shared'
+import { ApiError, ErrCode, errorBanner, bannerMessage, type ErrorBanner } from '@yggauth/shared'
 
 import { useSessionStore } from '../stores/session'
 
@@ -11,12 +11,19 @@ const route = useRoute()
 
 const token = computed(() => (typeof route.query.token === 'string' ? route.query.token : ''))
 const state = ref<'idle' | 'loading' | 'ok' | 'error'>('idle')
-const message = ref('')
+const message = ref<ErrorBanner | null>(null)
+/**
+ * 验证链接是**一次性**的:重复打开、或成功后刷新页面,第二次请求
+ * 必然拿到「令牌无效」。这时说「请重新获取」是句没人做得到的话 ——
+ * 待验证账号登不进去,重发接口又要求已登录。该说的是先去登录试试,
+ * 真没验证过再找管理员。
+ */
+const staleLink = ref(false)
 
 onMounted(async () => {
   if (!token.value) {
     state.value = 'error'
-    message.value = '链接缺少验证令牌'
+    message.value = bannerMessage('链接缺少验证令牌')
     return
   }
 
@@ -26,7 +33,8 @@ onMounted(async () => {
     state.value = 'ok'
   } catch (err) {
     state.value = 'error'
-    message.value = err instanceof ApiError ? err.message : '验证失败'
+    message.value = errorBanner(err, '验证失败')
+    staleLink.value = err instanceof ApiError && err.code === ErrCode.INVALID_TOKEN
   }
 })
 </script>
@@ -45,7 +53,19 @@ onMounted(async () => {
     </template>
   </a-result>
 
-  <a-result v-else status="error" title="验证失败" :sub-title="message">
+  <!--
+    结果页不能只报一句「验证失败」:用户此刻最想知道的是「然后怎么办」,
+    所以把可操作的 hint 也放进来。槽位名是 subTitle(与 a-result 源码一致),
+    写成 sub-title 会静默失效、只剩一个空副标题。
+  -->
+  <a-result v-else status="error" title="验证失败">
+    <template #subTitle>
+      <div>{{ message?.title }}</div>
+      <div v-if="staleLink" style="margin-top: 8px">
+        这个链接已经用过了(重复打开或刷新都会走到这里)。先去登录;如果仍提示邮箱尚未验证,请联系管理员处理。
+      </div>
+      <div v-else-if="message?.hint" style="margin-top: 8px">{{ message.hint }}</div>
+    </template>
     <template #extra>
       <RouterLink to="/login">返回登录</RouterLink>
     </template>

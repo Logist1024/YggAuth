@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { errorBanner, validateEmail, type ErrorBanner } from '@yggauth/shared'
 
 import { useSessionStore } from '../stores/session'
+import ErrorAlert from '../components/ErrorAlert.vue'
 
 const store = useSessionStore()
 const route = useRoute()
@@ -17,24 +18,15 @@ const banner = ref<ErrorBanner | null>(null)
 
 const canRegister = computed(() => store.policy.registration_mode !== 'closed')
 
-/**
- * 详情行:先给可操作的建议,再给错误码。
- *
- * 没有内容时返回 undefined,让 a-alert 干脆不渲染详情区 ——
- * 传空串会留下一个空白的描述块,看起来像样式坏了。
- */
-const bannerDetail = computed(() => {
-  if (!banner.value) {
-    return undefined
-  }
-  const lines = [banner.value.hint, banner.value.trace].filter(Boolean)
-  return lines.length > 0 ? lines.join('\n') : undefined
-})
-
 async function onSubmit(): Promise<void> {
+  // 防重入:按钮的 loading 挡得住点击,挡不住回车连发 —— 登录多打一次还会给限流计数加一笔。
+  if (submitting.value) return
   errors.email = validateEmail(form.email).message
   errors.password = form.password ? '' : '请输入密码'
   banner.value = null
+  // 一开写就作废旧提示:用户已经在重新登录了,
+  // 再挂着「密码已修改」「登录状态已过期」只会干扰下一次判断。
+  store.clearNotice()
   if (errors.email || errors.password) {
     return
   }
@@ -64,15 +56,21 @@ function isInternalPath(path: string): boolean {
 
 <template>
   <a-form layout="vertical" @submit.prevent="onSubmit">
+    <!--
+      跨页提示:改密成功、会话过期都会把人送回这一页。
+      用 success/info 而不是 error —— 这不是登录出了错,
+      只是解释「你为什么站在这里」,否则用户会以为自己被莫名踢出。
+    -->
     <a-alert
-      v-if="banner"
-      class="error-alert"
-      type="error"
+      v-if="store.notice"
+      :type="store.notice.type"
       show-icon
+      closable
       style="margin-bottom: 16px"
-      :message="banner.title"
-      :description="bannerDetail"
+      :message="store.notice.text"
+      @close="store.clearNotice()"
     />
+    <ErrorAlert :banner="banner" />
 
     <a-form-item label="邮箱" :validate-status="errors.email ? 'error' : ''" :help="errors.email">
       <a-input v-model:value="form.email" type="email" autocomplete="username" placeholder="you@example.com" />

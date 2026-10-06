@@ -10,6 +10,18 @@ import { ErrCode, ErrCodeSessionExpired, codeHint, codeTitle } from './codes'
 import { isEnvelope } from './index'
 
 /**
+ * 同源校验没过时的建议。
+ *
+ * 单独拎出来,是因为它在错误码上和「没有权限」是同一个 30001:
+ * 后端 RequirePermission 报「缺少权限:xxx」,CSRFProtect 报「请求来源校验失败」。
+ * 提示只跟错误码走的话,用户拿到的是「你没权限」,于是跑去要权限 ——
+ * 而真正要改的是访问地址(反向代理改写了 Host、或用与站点配置不一致的
+ * IP/端口访问)。等后端补一个专用错误码后,这段特判就可以删掉。
+ */
+const SAME_ORIGIN_HINT =
+  '同源校验没通过:一般是访问地址与站点配置不一致(换过 IP、端口,或经反向代理改写了 Host),换成本站配置的地址再试。'
+
+/**
  * 后端返回的业务错误。
  *
  * 除了原始的 code / status,还预先算好了三样展示用的东西 ——
@@ -32,12 +44,22 @@ export class ApiError extends Error {
     this.code = code
     this.status = status
     this.title = title
-    this.hint = codeHint(code)
+    this.hint =
+      code === ErrCode.FORBIDDEN && title.includes('来源校验') ? SAME_ORIGIN_HINT : codeHint(code)
   }
 
-  /** 会话失效,应当引导用户重新登录。 */
+  /**
+   * 会话失效,应当引导用户重新登录。
+   *
+   * 只认「这次响应说明登录态没了」的错误。密码错(20002)与账号被锁
+   * (20006)的 HTTP 状态同样是 401,但它们说的是**这次输入不对**,
+   * 不是**你没有登录态** —— 混进来会让登录页在用户填错密码时
+   * 跑一遍会话恢复,把一句「密码错了」演成「登录状态已过期」。
+   */
   get requiresLogin(): boolean {
-    return this.status === 401 || this.code === ErrCodeSessionExpired
+    if (this.code === ErrCodeSessionExpired) return true
+    if (this.status !== 401) return false
+    return this.code !== ErrCode.INVALID_PASSWORD && this.code !== ErrCode.ACCOUNT_LOCKED
   }
 
   /** 供支持人员定位的一行信息:错误码 + HTTP 状态。 */
@@ -72,6 +94,19 @@ export function errorBanner(err: unknown, fallback: string): ErrorBanner {
     return { title: '无法连接服务器', hint: '请检查网络连接后重试。', trace: '' }
   }
   return { title: fallback, hint: '', trace: '' }
+}
+
+/**
+ * 本地校验与提示类的错误 —— 没有异常、也没有错误码可给。
+ *
+ * 与 errorBanner 的分工:那个把**捕获到的异常**转成提示,
+ * 这个直接包装一句我们自己知道的话(「名称不能为空」)。
+ *
+ * 返回结构而不是字符串,是为了让渲染端只有一种横幅形态 ——
+ * 否则同一页面上「后端报错」和「本地校验失败」会长得不一样。
+ */
+export function bannerMessage(title: string, hint = ''): ErrorBanner {
+  return { title, hint, trace: '' }
 }
 
 export interface ApiOptions {

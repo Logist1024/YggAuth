@@ -198,6 +198,12 @@ func lower(s string) string {
 type fakeTokenStore struct {
 	tokens map[string]uuid.UUID
 	purpos map[string]string
+
+	// countSince / lastAt 是 CountSince 与 LastCreatedAt 的固定返回值,
+	// 让重发邮件的限流分支可以直接摆测,不必真的推进 mock 时钟。
+	countSince int64
+	lastAt     time.Time
+	hasLast    bool
 }
 
 func newFakeTokenStore() *fakeTokenStore {
@@ -217,6 +223,14 @@ func (s *fakeTokenStore) Consume(_ context.Context, purpose, plain string) (uuid
 	}
 	delete(s.tokens, plain)
 	return id, nil
+}
+
+func (s *fakeTokenStore) CountSince(_ context.Context, _ uuid.UUID, _ string, _ time.Time) (int64, error) {
+	return s.countSince, nil
+}
+
+func (s *fakeTokenStore) LastCreatedAt(_ context.Context, _ uuid.UUID, _ string) (time.Time, bool, error) {
+	return s.lastAt, s.hasLast, nil
 }
 
 type nopLogger struct{}
@@ -600,4 +614,122 @@ func TestSetStatusRejectsUnknownValue(t *testing.T) {
 	_, err := svc.SetStatus(context.Background(), acc.ID, domain.AccountStatus("bogus"))
 	require.Error(t, err)
 	require.True(t, apperr.Is(err, apperr.CodeInvalidArgument))
+}
+
+// ---------------------------------------------------------------- 邮件正文
+
+// captureMailer 把发出的邮件攒下来,便于断言正文。
+type captureMailer struct{ msgs []account.Message }
+
+func (m *captureMailer) Send(_ context.Context, msg account.Message) error {
+	m.msgs = append(m.msgs, msg)
+	return nil
+}
+
+// TestResetMailLinkIsAbsolute 邮件里的链接必须是完整可点的地址。
+//
+// 验证、重置、改邮箱三封邮件过去都写死了一个**从未被任何代码替换**的
+// "{{BASE_URL}}" 占位符:收件人拿到一条点不开的死链,而服务端日志一路
+// 正常,坏了也没人发现(开发用 console 传输、注册又不发信,于是更难暴露)。
+// 拼链接现在只走 Service.baseURL 一处,这里守住它连同结尾斜杠的处理。
+func TestResetMailLinkIsAbsolute(t *testing.T) {
+	t.Parallel()
+
+	mail := &captureMailer{}
+	clk := clock.NewMock(baseTime)
+	repo := newFakeRepo(clk)
+	svc := account.NewService(repo, newFakeTokenStore(), fastHasher(), clk, account.Config{
+		Policy:           account.Policy{MinLength: 8, MaxLength: 128},
+		RegistrationMode: "open",
+		EmailTokenTTL:    24 * time.Hour,
+		Mailer:           mail,
+		// 结尾的斜杠必须被截掉,否则拼出来是 //reset-password?...
+		PublicBaseURL: "https://auth.example.com/",
+	}, nopLogger{})
+
+	registerActive(t, svc, "user@example.com", "correct-horse-battery")
+
+	require.NoError(t, svc.RequestPasswordReset(context.Background(), account.RequestPasswordResetInput{
+		Email: "user@example.com",
+	}))
+
+	// 注册现在也发信了(见 TestRegisterSendsVerificationMail),所以这里收到两封 ——
+	// 本测试只挑出重置那封,要守的是它正文里那个链接的绝对地址。
+	require.Len(t, mail.msgs, 2)
+	var reset account.Message
+	for _, m := range mail.msgs {
+		if m.Subject == "重置你的密码" {
+			reset = m
+		}
+	}
+	require.NotEmpty(t, reset.Text, "没收到重置邮件")
+	require.NotContains(t, reset.Text, "{{BASE_URL}}")
+	require.Contains(t, reset.Text, "https://auth.example.com/reset-password?token=")
+}
+
+// TestRegisterSendsVerificationMail 注册那一刻就把验证邮件发出去。
+//
+// 此前 Register 只签发令牌、全程不碰 Mailer,响应里的 verify_url 成了
+// 唯一出口 —— 「证明你拥有这个邮箱」于是变成「谁先注册谁拥有它」,
+// 而本人自始至终收不到任何邮件。
+func TestRegisterSendsVerificationMail(t *testing.T) {
+	t.Parallel()
+
+	mail := &captureMailer{}
+	clk := clock.NewMock(baseTime)
+	repo := newFakeRepo(clk)
+	svc := account.NewService(repo, newFakeTokenStore(), fastHasher(), clk, account.Config{
+		Policy:           account.Policy{MinLength: 8, MaxLength: 128},
+		RegistrationMode: "open",
+		EmailTokenTTL:    24 * time.Hour,
+		Mailer:           mail,
+		PublicBaseURL:    "https://auth.example.com",
+	}, nopLogger{})
+
+	out, err := svc.Register(context.Background(), account.RegisterInput{
+		Username: "player_one",
+		Email:    "user@example.com",
+		Password: "correct-horse-battery",
+	})
+	require.NoError(t, err)
+
+	require.Len(t, mail.msgs, 1)
+	require.Equal(t, "user@example.com", mail.msgs[0].To)
+	require.Contains(t, mail.msgs[0].Text, "https://auth.example.com/verify-email?token=")
+	require.NotContains(t, mail.msgs[0].Text, "{{BASE_URL}}")
+	// 邮件投递不出去的默认部署(console),链接照旧随响应回来,注册闭环才走得通
+	require.Contains(t, out.VerifyURL, "token="+out.VerifyToken)
+}
+
+// TestRegisterHidesVerifyURLWhenMailDelivers 邮件投递得出时,令牌只走邮件。
+//
+// HideVerifyURL 是给 smtp 部署用的:同一份令牌再从 HTTP 响应递一遍,
+// 替别人注册的人顺手就拿到了它,邮箱验证也就形同虚设。
+func TestRegisterHidesVerifyURLWhenMailDelivers(t *testing.T) {
+	t.Parallel()
+
+	mail := &captureMailer{}
+	clk := clock.NewMock(baseTime)
+	repo := newFakeRepo(clk)
+	svc := account.NewService(repo, newFakeTokenStore(), fastHasher(), clk, account.Config{
+		Policy:           account.Policy{MinLength: 8, MaxLength: 128},
+		RegistrationMode: "open",
+		EmailTokenTTL:    24 * time.Hour,
+		Mailer:           mail,
+		PublicBaseURL:    "https://auth.example.com",
+		HideVerifyURL:    true,
+	}, nopLogger{})
+
+	out, err := svc.Register(context.Background(), account.RegisterInput{
+		Username: "player_one",
+		Email:    "user@example.com",
+		Password: "correct-horse-battery",
+	})
+	require.NoError(t, err)
+
+	require.Empty(t, out.VerifyURL, "投递得出的部署不该把验证令牌随响应回给调用方")
+	// 信照发、令牌照签,少的只是「响应里那一份」
+	require.NotEmpty(t, out.VerifyToken)
+	require.Len(t, mail.msgs, 1)
+	require.Contains(t, mail.msgs[0].Text, "token="+out.VerifyToken)
 }

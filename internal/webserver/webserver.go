@@ -120,6 +120,18 @@ func (s *SPA) handler() http.Handler {
 
 		data, err := fs.ReadFile(s.fsys, upath)
 		if err != nil {
+			// 带扩展名的路径只可能是静态资源,不可能是深链接 ——
+			// 两个 SPA 的路由里没有任何带点的路径。
+			//
+			// 这类请求若也回退成 index.html,浏览器会把 HTML 当 JS/CSS 解析,
+			// 报出「Unexpected token '<'」这种与真实原因毫无关系的错;
+			// 而真正的场景往往是部署后老页面还开着、指着已经删掉的旧哈希文件 ——
+			// 明确的 404 才让人一眼看出「产物没了」,也才走得到 vite preload 的
+			// error 分支(200 + HTML 在它眼里是一次成功加载)。
+			if filepath.Ext(upath) != "" {
+				httpx.NotFound(w, r)
+				return
+			}
 			// 未知路径回退到 index.html:刷新 /security 这样的深链接
 			// 必须能打开页面,而不是拿到一个 404。
 			s.serveIndex(w, r)

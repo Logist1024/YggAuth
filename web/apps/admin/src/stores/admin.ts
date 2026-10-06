@@ -38,9 +38,24 @@ export const useAdminStore = defineStore('admin', () => {
   const permissions = ref<string[]>([])
   const menu = ref<MenuItem[]>([])
   const loading = ref(false)
+  /**
+   * 登录页顶部的一次性提示。
+   *
+   * 会话过期时后台会把人送回登录页 —— 不给一句话,管理员看到的
+   * 就是「点着点着就被踢出来了」。只在「本以为还登录着」时才写,
+   * 否则刚打开站点、本来就没登录的人也会看到一句「已过期」。
+   */
+  const notice = ref<string | null>(null)
 
   const api = new ApiClient({
-    onUnauthorized: async () => false,
+    // 与账号站一致:会话是 HttpOnly cookie,前端没有可拿去刷新的
+    // 凭据,恢复不了就返回 false,跳转交给路由守卫。
+    onUnauthorized: async () => {
+      if (account.value) {
+        notice.value = '登录状态已过期,请重新登录。'
+      }
+      return false
+    },
   })
 
   const isAuthenticated = computed(() => account.value !== null)
@@ -110,7 +125,13 @@ export const useAdminStore = defineStore('admin', () => {
       account.value = null
       permissions.value = []
       menu.value = []
+      // 主动退出不需要解释,也别把早先那句「已过期」带过去。
+      notice.value = null
     }
+  }
+
+  function clearNotice(): void {
+    notice.value = null
   }
 
   return {
@@ -118,11 +139,13 @@ export const useAdminStore = defineStore('admin', () => {
     permissions,
     menu,
     loading,
+    notice,
     api,
     isAuthenticated,
     visibleMenu,
     has,
     load,
+    clearNotice,
     logout,
   }
 })

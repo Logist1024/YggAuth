@@ -1,0 +1,2 @@
+import{d as s,c,k as l,f as i,r as m,o as p}from"./vendor-CWg_5CLH.js";const u=s({__name:"ErrorAlert",props:{banner:{}},setup(e){const o=e,t=i(()=>{var n,r;return[(n=o.banner)==null?void 0:n.hint,(r=o.banner)==null?void 0:r.trace].filter(Boolean).join(`
+`)});return(n,r)=>{const a=m("a-alert");return e.banner?(p(),c(a,{key:0,class:"error-alert",type:"error","show-icon":"",style:{"margin-bottom":"16px"},message:e.banner.title,description:t.value||void 0},null,8,["message","description"])):l("",!0)}}});export{u as _};

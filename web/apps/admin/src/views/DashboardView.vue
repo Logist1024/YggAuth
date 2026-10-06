@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
-import { ApiError } from '@yggauth/shared'
+import { errorBanner, type ErrorBanner } from '@yggauth/shared'
 
 import { useAdminStore } from '../stores/admin'
+import ErrorAlert from '../components/ErrorAlert.vue'
 
 interface Stats {
   accounts_total: number
@@ -32,14 +33,16 @@ interface Todo {
 
 const store = useAdminStore()
 const stats = ref<Stats | null>(null)
-const error = ref('')
+const error = ref<ErrorBanner | null>(null)
+const loading = ref(false)
 
 /**
  * 卡片排成两列而不是四列。
  *
- * `.page` 的 max-width 是 960px,四列时每张卡内宽只有约 180px,
- * 一行说明文字必然折成「…新增 1 / 个」这种带孤字的换行。
- * 两列换来的是能写清楚每个数字的含义 —— 那才是这几张卡的价值所在。
+ * `.page` 的 max-width 是 1200px,四列时每张卡内宽约 280px,
+ * 而每张卡下面都有一到两行说明文字,必然折成「…新增 1 / 个」
+ * 这种带孤字的换行。两列换来的是能写清楚每个数字的含义 ——
+ * 那才是这几张卡的价值所在,数字本身一行就放得下。
  */
 const cards = computed<Card[]>(() => {
   const s = stats.value
@@ -103,21 +106,30 @@ const todos = computed<Todo[]>(() => {
 })
 
 onMounted(async () => {
+  loading.value = true
   try {
     stats.value = await store.api.get<Stats>('/api/admin/dashboard')
   } catch (err) {
-    error.value = err instanceof ApiError ? err.message : '查询失败'
+    error.value = errorBanner(err, '查询失败')
+  } finally {
+    loading.value = false
   }
 })
 </script>
 
 <template>
   <div class="page">
-    <a-alert v-if="error" type="error" :message="error" show-icon style="margin-bottom: 16px" />
+    <ErrorAlert :banner="error" />
 
     <p class="muted" style="margin-bottom: 16px">
-      这里是当前部署的运行概览。下面几项如果显示为 0,页面底部会给出下一步该做什么。
+      这里是当前部署的运行概览。下面几项如果显示为 0,紧接着的「下一步」会给出该做的事。
     </p>
+
+    <!--
+      加载中给一块骨架而不是留白:首屏只有一段说明文字、
+      卡片位置空着,看起来像接口挂了,实际只是还没返回。
+    -->
+    <a-skeleton v-if="loading" active :paragraph="{ rows: 6 }" style="margin-bottom: 16px" />
 
     <a-row v-if="stats" :gutter="16">
       <a-col v-for="c in cards" :key="c.title" :span="12">

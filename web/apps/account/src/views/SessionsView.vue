@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 
-import { ApiError } from '@yggauth/shared'
+import { formatRelative, errorBanner, type ErrorBanner } from '@yggauth/shared'
 
 import { useSessionStore } from '../stores/session'
+import ErrorAlert from '../components/ErrorAlert.vue'
 
 interface SessionItem {
   id: string
@@ -17,7 +18,7 @@ interface SessionItem {
 const store = useSessionStore()
 const items = ref<SessionItem[]>([])
 const loading = ref(false)
-const banner = ref('')
+const banner = ref<ErrorBanner | null>(null)
 
 onMounted(load)
 
@@ -29,30 +30,30 @@ async function load(): Promise<void> {
     const data = await store.api.get<{ sessions: SessionItem[] }>('/api/account/sessions')
     items.value = data.sessions ?? []
   } catch (err) {
-    banner.value = err instanceof ApiError ? err.message : '查询失败'
+    banner.value = errorBanner(err, '查询失败')
   } finally {
     loading.value = false
   }
 }
 
 async function revoke(id: string): Promise<void> {
-  banner.value = ''
+  banner.value = null
   try {
     await store.api.delete(`/api/account/sessions/${id}`)
     await load()
   } catch (err) {
-    banner.value = err instanceof ApiError ? err.message : '吊销失败'
+    banner.value = errorBanner(err, '吊销失败')
   }
 }
 
 async function logoutAll(): Promise<void> {
-  banner.value = ''
+  banner.value = null
   try {
     await store.api.post('/api/auth/logout-all')
     await store.logout()
     location.href = '/login'
   } catch (err) {
-    banner.value = err instanceof ApiError ? err.message : '操作失败'
+    banner.value = errorBanner(err, '操作失败')
   }
 }
 </script>
@@ -63,7 +64,7 @@ async function logoutAll(): Promise<void> {
     <p class="muted" style="margin-bottom: 16px">
       这里列出所有保持登录状态的设备。发现不认识的设备时,让它退出并顺手改一次密码。
     </p>
-    <a-alert v-if="banner" type="error" :message="banner" show-icon style="margin-bottom: 16px" />
+    <ErrorAlert :banner="banner" />
 
     <a-spin :spinning="loading">
       <a-list bordered :data-source="items">
@@ -75,7 +76,7 @@ async function logoutAll(): Promise<void> {
                 <a-tag v-if="item.current" color="green">当前设备</a-tag>
               </template>
               <template #description>
-                {{ item.ip }} · 最近活动 {{ new Date(item.last_seen_at).toLocaleString() }}
+                {{ item.ip }} · 最近活动 {{ formatRelative(item.last_seen_at) }}
               </template>
             </a-list-item-meta>
             <template #actions>

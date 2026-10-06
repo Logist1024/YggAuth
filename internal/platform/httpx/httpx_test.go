@@ -221,3 +221,28 @@ func TestRandomTokenIsURLSafe(t *testing.T) {
 func TestRequestIDFromEmptyContext(t *testing.T) {
 	require.Empty(t, httpx.RequestID(context.Background()))
 }
+
+// 登出/过期后带着旧 cookie 回来的人,听到的该是「登录态已过期,请重新登录」;
+// 空手访问受保护接口的才是「未认证」。两句话对应两件不同的事 ——
+// 而 SessionAuth 会吞掉失效凭据的错误继续放行,这面小旗是唯一的区分依据。
+func TestRequireAuthDistinguishesMissingAndRejectedCredential(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		httpx.OK(w, nil)
+	})
+
+	// 没带凭据 → 20001
+	rec := httptest.NewRecorder()
+	httpx.RequireAuth(next).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/account", nil))
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	require.Equal(t, apperr.CodeUnauthorized, decode(t, rec).Code)
+
+	// 带了但已被拒绝 → 20012,消息要能直接读
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/account", nil)
+	req = req.WithContext(httpx.WithRejectedCredential(req.Context()))
+	httpx.RequireAuth(next).ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	body := decode(t, rec)
+	require.Equal(t, apperr.CodeSessionExpired, body.Code)
+	require.Equal(t, "登录态已过期,请重新登录", body.Message)
+}

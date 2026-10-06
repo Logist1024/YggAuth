@@ -8,9 +8,12 @@
 
 ## 登录与认证
 
-- [ ] **`requiresLogin` 太宽，把密码错当成会话过期**（`web/shared/src/api.ts` `ApiError.requiresLogin`）
-  现在定义为 `status === 401 || code === 20012`。问题是 `CodeInvalidPassword`（密码错，20002）的 HTTP 状态也是 401，于是账号站登录页填错密码会被前端当成「需要刷新会话」，触发自动跳登录。
-  修复方向：改成 `status === 401 && code !== CodeInvalidPassword && code !== CodeAccountLocked`，或者更窄的语义匹配。
+- [ ] **CSRF 拦截与「缺少权限」共用错误码 30001**
+  `httpx.CSRFProtect` 失败时返回 `CodeForbidden` +「请求来源校验失败」，而 `RequirePermission` 返回同一个码 +「缺少权限:xxx」。
+  同源校验失败与「你没有权限」是两件毫不相干的事，前端只能靠**比对后端文案**来给对提示
+  （`web/shared/src/api.ts` 的 `SAME_ORIGIN_HINT` 特判）—— 后端哪天改了这句话，提示会静默退回成「你没权限」。
+  修法：`apperr` 里**追加**一个专用码（现有数值不能改，见 `apperr.go` 的注释），`CSRFProtect` 改用它，
+  `web/shared/src/codes.ts` 加一条提示，再删掉 `api.ts` 里那段特判。
 
 - [ ] **生产没有自动 bootstrap 管理员账号**
   现状：迁移只种 `platform_admin` / `user` 两个**角色**，第一个管理员账号要手工注册 + 改库授权（`docs/10-test-deployment.md` 五），新部署第一次启动后什么都做不了。
@@ -22,6 +25,16 @@
   - 检测到非本地访问尝试用默认密码登录时，返回明确提示「请通过环境变量 `PASSWORD` 设置管理员密码」
   - 环境变量 `PASSWORD` 若已设置，则用其作为默认管理员密码（覆盖 123456）
   - 风险点：自动创建意味着应用要有「初始化」入口；要在 `REGISTRATION_MODE=invite_only` 时也能跑通（不然公开注册也能创建一个同名账号冲突）；要在启动日志里大声说一句「默认管理员已创建，密码是 xxx」
+
+- [ ] **`POST /api/auth/email/resend` 实际上没有任何人能调用**
+  它挂在 `requireAuth` 下（`internal/identity/handler.go`），而账号一旦进入「待验证邮箱」，
+  `internal/transport/auth.go` 的 `acc.Status.Usable()` 检查就会让**所有**带会话的请求回 403 ——
+  于是真正需要重发验证邮件的人拿不到接口，拿得到接口的人（邮箱已验证）也不需要它。
+  实测：改完邮箱后 `GET /api/account/` 立刻返回 `20003 账号已被禁用`，当前会话从这一刻起就失效了。
+  修法（后端）：重发接口只校验「会话属于本账号」，不要求账号 `Usable()`；
+  或者更彻底一点，像注册那样把 `verify_url` 一并回给调用方，前端直接给按钮。
+  前端已按现状兜住：改邮箱后主动把人送回登录页并说清「验证完成后才能重新登录」
+  （`web/apps/account/src/views/SecurityView.vue`），没有硬塞一个点不动的「重发邮件」按钮。
 
 ## 编排与环境
 
@@ -48,8 +61,7 @@
 
 ## 已知功能缺口
 
-- [ ] **后台没有「把角色授予账号」的界面**
-  接口 `/api/admin/roles/grant` 已存在，但后台缺一个页面调它。新建的角色目前没法分配给任何账号，只能走 SQL 手工 `INSERT`。
+（原「后台没有『把角色授予账号』的界面」一条已完成，按约定删除。）
 
 ## 部署运维
 

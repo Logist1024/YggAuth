@@ -242,6 +242,9 @@ var (
 	ErrInvalidArgument = New(CodeInvalidArgument, "")
 	// ErrUnauthorized 未认证。
 	ErrUnauthorized = New(CodeUnauthorized, "")
+	// ErrSessionExpired 带了凭据,但登录态已经没了(登出、过期、被踢下线)。
+	// 与 ErrUnauthorized 分开:用户该听到的是「请重新登录」,不是「未认证」。
+	ErrSessionExpired = New(CodeSessionExpired, "")
 	// ErrForbidden 权限不足。
 	ErrForbidden = New(CodeForbidden, "")
 	// ErrNotFound 资源不存在。

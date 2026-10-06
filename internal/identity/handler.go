@@ -162,12 +162,16 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ObserveAccountCreated()
-	httpx.Created(w, map[string]any{
+	body := map[string]any{
 		"account": toAccountView(out.Account),
-		// 验证链接直接回给调用方:生产由邮件发送,接口保留是为了
-		// 无邮件服务的部署也能完成注册闭环
-		"verify_url": h.base + "/verify-email?token=" + out.VerifyToken,
-	})
+	}
+	// 验证链接只在「邮件到不了收件人」的部署里内联回来(见 account.Config.HideVerifyURL)。
+	// smtp 下令牌必须只走邮件:同一份令牌再从 HTTP 响应递一遍,
+	// 谁替别人注册谁就拿到它,邮箱验证也就形同虚设。
+	if out.VerifyURL != "" {
+		body["verify_url"] = out.VerifyURL
+	}
+	httpx.Created(w, body)
 }
 
 // Login 处理登录。
@@ -335,10 +339,10 @@ func (h *Handler) ResendVerification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 统一返回成功:即便邮箱已验证,也不告诉调用方,
-	// 避免被用来探测某个账号的验证状态
-	if err := h.svc.Accounts.RequestPasswordReset(r.Context(), account.RequestPasswordResetInput{
-		Email:     p.Email,
+	// 统一返回成功:即便邮箱已验证、或被冷却/每日上限拦下,
+	// 也不告诉调用方,避免被用来探测某个账号的验证状态
+	if err := h.svc.Accounts.ResendVerification(r.Context(), account.ResendVerificationInput{
+		AccountID: p.AccountID,
 		IP:        httpx.ClientIP(r, h.cookie.TrustProxyHeaders),
 		UserAgent: r.UserAgent(),
 	}); err != nil {
@@ -517,8 +521,11 @@ func (h *Handler) MyAudit(w http.ResponseWriter, r *http.Request) {
 	accID := p.AccountID
 	entries, total, err := h.svc.Audit.Search(r.Context(), audit.Filter{
 		AccountID: &accID,
-		Limit:     limit,
-		Offset:    offset,
+		// 动作与结果只是缩小范围,不影响「只看自己」这条硬约束
+		Action:  r.URL.Query().Get("action"),
+		Outcome: r.URL.Query().Get("outcome"),
+		Limit:   limit,
+		Offset:  offset,
 	})
 	if err != nil {
 		httpx.Fail(w, err)

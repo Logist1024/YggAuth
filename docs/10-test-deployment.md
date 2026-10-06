@@ -238,7 +238,9 @@ curl -s -X POST http://localhost:3000/api/auth/register \
   -d '{"username":"tester","email":"tester@test.local","password":"correct-horse-battery"}'
 ```
 
-响应里直接带 `verify_url`(生产走邮件,接口保留是为了无邮件服务时也能跑通注册闭环):
+注册这一刻后端就会发验证邮件;`MAILER_TRANSPORT=console` 时信只进日志、到不了收件人,
+所以响应里**额外**带一个 `verify_url` 让本地闭环跑得通;`smtp` 部署则只回 `account`
+—— 令牌只从邮件那一条路出去(见 `account.Config.HideVerifyURL`):
 
 ```json
 {"code":0,"message":"ok","data":{"account":{...},"verify_url":"http://localhost:3000/verify-email?token=..."}}
@@ -318,7 +320,7 @@ curl -s -b /tmp/yg.cookie http://localhost:3000/api/admin/menus | head -c 300; e
 | 4 | OIDC issuer | `curl -s localhost:3000/oauth/.well-known/openid-configuration` | `issuer` 与 `PUBLIC_BASE_URL` **逐字符相同** |
 | 5 | JWKS | `curl -s localhost:3000/oauth/.well-known/jwks.json` | 含至少一个公钥 |
 | 6 | 密码策略 | `curl -s localhost:3000/api/auth/policy` | `data.password_min_length=8`、`data.password_max_length=128` |
-| 7 | 注册 | 见 5.1 | 201,响应含 `verify_url` |
+| 7 | 注册 | 见 5.1 | 201;console 部署响应含 `verify_url`,`smtp` 只回 `account` |
 | 8 | 登录 | 见 5.3 | 200,响应体是 `{"code":0,...}` 信封 |
 | 9 | 会话生效 | `curl -s -b /tmp/yg.cookie localhost:3000/api/account/` | 200,返回账号信息 |
 | 10 | 后台可达 | `curl -s -b /tmp/yg.cookie localhost:3000/api/admin/me` | 200,含权限点 |

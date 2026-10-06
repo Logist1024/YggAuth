@@ -8,7 +8,13 @@ body {
 }
 
 .page {
-  max-width: 960px;
+  /*
+   * 1200px 而不是 960px:审计日志、账号管理这类宽表有 6–7 列,
+   * 在 960 下即便列宽分配合理也会被压到读不了。
+   * 与表格的 scroll.x 同值,保证容器刚好放下全部列而不出现
+   * 「表格比页面宽一点点」的错位滚动。
+   */
+  max-width: 1200px;
   margin: 0 auto;
   padding: 24px 16px 48px;
 }
@@ -75,4 +81,50 @@ body {
  */
 .error-alert .ant-alert-description {
   white-space: pre-line;
+}
+
+/*
+ * 就地的行内错误文字。
+ *
+ * 与 error-alert(整块告警)的区别:行内错误紧跟在触发它的
+ * 控件旁边,不打断页面布局 —— 顶栏提示条、表单按钮旁的
+ * 即时反馈都用它。
+ */
+.error-text {
+  color: #cf1322;
+  font-size: 13px;
+}
+
+/*
+ * 页面切换过渡(布局里的 <Transition name="route">)。
+ *
+ * 只做进场,不做退场:退场要么让人等旧页面演完(mode="out-in"
+ * 下是两段时长相加),要么让新旧内容同屏叠着(default 模式下
+ * 非定位元素会互相挤压)。不设退场时旧页面立即让位、新页面
+ * 淡入并上移 6px,已经足够让人看清「换了一页」。
+ *
+ * 6px / 160ms 是刻意的小:再大就从「导航有反馈」变成「每次
+ * 点菜单都要等一下」,那是负收益。
+ */
+.route-enter-active {
+  transition:
+    opacity 160ms ease-out,
+    transform 160ms ease-out;
+}
+
+.route-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+/*
+ * 系统开了「减少动态效果」就完全不动。
+ *
+ * 这类位移会让前庭功能敏感的用户不适,属于可访问性要求,
+ * 不是个人口味 —— 所以按媒体查询一刀切掉,而不是只调小参数。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .route-enter-active {
+    transition: none;
+  }
 }

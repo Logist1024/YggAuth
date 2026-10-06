@@ -23,6 +23,7 @@ import (
 	"github.com/yggauth/yggauth/internal/oidc"
 	"github.com/yggauth/yggauth/internal/platform/apperr"
 	"github.com/yggauth/yggauth/internal/platform/clock"
+	"github.com/yggauth/yggauth/internal/platform/db"
 	"github.com/yggauth/yggauth/internal/platform/db/testdb"
 	"github.com/yggauth/yggauth/internal/platform/keys"
 	"github.com/yggauth/yggauth/internal/transport"
@@ -40,6 +41,9 @@ type env struct {
 	svc           *identity.Service
 	clientService *oidc.ClientService
 	keys          *keys.Manager
+	// pool 供测试直接写库造数据 —— MC 档案/材质这类由协议流程维护的表,
+	// 走一遍登录链路太绕,要测的是后台的查询本身。
+	pool *db.Pool
 }
 
 func newEnv(t *testing.T) *env {
@@ -104,7 +108,7 @@ func newEnv(t *testing.T) *env {
 		},
 	}).Handler()
 
-	return &env{handler: handler, svc: svc, clientService: clientSvc, keys: testKeys}
+	return &env{handler: handler, svc: svc, clientService: clientSvc, keys: testKeys, pool: pool}
 }
 
 type envelope struct {
@@ -551,6 +555,89 @@ func TestAdminInvitations(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body.Data, &list))
 	require.Len(t, list.Invitations, 1)
 	require.Equal(t, inv.Code, list.Invitations[0].Code)
+}
+
+// 后台的两个 MC 列表:菜单里一直有入口,点进去却只有「功能暂未开放」的占位页。
+func TestAdminMCProfilesAndTextures(t *testing.T) {
+	e := newEnv(t)
+	cookie := makeAdmin(t, e)
+
+	// 直接写库造数据。这两张表由 MC 登录流程维护,走一遍协议链路太绕,
+	// 这里要测的是后台的列表查询本身。
+	_, err := e.pool.Exec(t.Context(), `
+INSERT INTO minecraft.profile (account_id, uuid, current_name)
+SELECT a.id, gen_random_uuid(), 'Admin_Player'
+FROM identity.account a
+ORDER BY a.created_at
+LIMIT 1`)
+	require.NoError(t, err)
+
+	rec, body := call(t, e.handler, http.MethodGet,
+		"/api/admin/mc/profiles?search=player", nil, []*http.Cookie{cookie})
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+
+	var profiles struct {
+		Profiles []struct {
+			CurrentName string `json:"current_name"`
+			UUID        string `json:"uuid"`
+			HasSkin     bool   `json:"has_skin"`
+			HasCape     bool   `json:"has_cape"`
+		} `json:"profiles"`
+		Total int `json:"total"`
+	}
+	require.NoError(t, json.Unmarshal(body.Data, &profiles))
+	require.Equal(t, 1, profiles.Total)
+	require.Len(t, profiles.Profiles, 1)
+	require.Equal(t, "Admin_Player", profiles.Profiles[0].CurrentName)
+	require.NotEmpty(t, profiles.Profiles[0].UUID)
+	require.False(t, profiles.Profiles[0].HasSkin, "没上传过皮肤时不该显示已上传")
+
+	// 搜索是子串匹配,且不解释通配符:输入 % 应当只匹配名字里真有 % 的档案。
+	rec, body = call(t, e.handler, http.MethodGet,
+		"/api/admin/mc/profiles?search=%25", nil, []*http.Cookie{cookie})
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(body.Data, &profiles))
+	require.Zero(t, profiles.Total, "% 不该被当成通配符")
+
+	// 材质
+	_, err = e.pool.Exec(t.Context(), `
+INSERT INTO minecraft.texture (hash, type, size, width, height, ref_count)
+VALUES (md5('admin-test'), 'skin', 2048, 64, 64, 1)`)
+	require.NoError(t, err)
+
+	rec, body = call(t, e.handler, http.MethodGet,
+		"/api/admin/mc/textures?kind=skin", nil, []*http.Cookie{cookie})
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+
+	var textures struct {
+		Textures []struct {
+			Hash     string `json:"hash"`
+			Type     string `json:"type"`
+			Width    int32  `json:"width"`
+			Height   int32  `json:"height"`
+			RefCount int32  `json:"ref_count"`
+		} `json:"textures"`
+		Total int `json:"total"`
+	}
+	require.NoError(t, json.Unmarshal(body.Data, &textures))
+	require.Equal(t, 1, textures.Total)
+	require.Len(t, textures.Textures, 1)
+	require.Equal(t, "skin", textures.Textures[0].Type)
+	require.Equal(t, int32(64), textures.Textures[0].Width)
+	require.Equal(t, int32(1), textures.Textures[0].RefCount)
+
+	// kind 拼错要明说,不能静默不过滤
+	rec, resp := call(t, e.handler, http.MethodGet,
+		"/api/admin/mc/textures?kind=capee", nil, []*http.Cookie{cookie})
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Equal(t, int(apperr.CodeInvalidArgument), resp.Code)
+
+	// 没有权限点的普通用户一律 403
+	_, userCookie := makeUser(t, e)
+	for _, path := range []string{"/api/admin/mc/profiles", "/api/admin/mc/textures"} {
+		rec, _ := call(t, e.handler, http.MethodGet, path, nil, []*http.Cookie{userCookie})
+		require.Equal(t, http.StatusForbidden, rec.Code, "%s 对无权限用户应 403", path)
+	}
 }
 
 func callRecorder(t *testing.T, h http.Handler, path string, cookies ...*http.Cookie) *httptest.ResponseRecorder {

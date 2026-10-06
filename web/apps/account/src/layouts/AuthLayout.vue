@@ -18,7 +18,12 @@ const theme = computed(() => store.theme)
       <h1 class="auth-title" :style="{ color: theme.primary }">{{ theme.title }}</h1>
       <p class="auth-subtitle">{{ theme.subtitle }}</p>
       <p class="auth-purpose">一个账号,同时登录内部业务系统与 Minecraft 服务器。</p>
-      <RouterView />
+      <!-- 过渡样式见 styles.css:登录 ↔ 注册 ↔ 找回密码来回跳时给点反馈 -->
+      <RouterView v-slot="{ Component }">
+        <Transition name="route">
+          <component :is="Component" />
+        </Transition>
+      </RouterView>
     </div>
   </div>
 </template>

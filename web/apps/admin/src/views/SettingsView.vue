@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
-import { ApiError } from '@yggauth/shared'
+import { errorBanner, bannerMessage, type ErrorBanner } from '@yggauth/shared'
 
 import { useAdminStore } from '../stores/admin'
+import ErrorAlert from '../components/ErrorAlert.vue'
 
 /**
  * 配置项的展示元数据。
@@ -13,12 +14,16 @@ import { useAdminStore } from '../stores/admin'
  * 但输入控件的形态、以及提交时该用哪种 JSON 类型,都必须由类型决定 ——
  * 把 900 当字符串发回去,后端按整数读就会失败。所以这张表是必需的。
  *
- * 未登记的键不会消失:回落到「用原始键名当标签 + 文本框」,只是没有中文说明。
+ * 下表覆盖 db/migrations/00004_init_app.sql 里 INSERT 的**全部** 12 个键。
+ * 那次迁移是权威清单:后台只是覆盖值,不会再新增键。
+ *
+ * 未登记的键不会消失:按**值的实际类型**推断控件(见 inferType),
+ * 只是没有中文标签。
  */
 interface SettingMeta {
   label: string
   description: string
-  type: 'number' | 'boolean' | 'enum'
+  type: 'number' | 'boolean' | 'enum' | 'text'
   /** type 为 enum 时的可选项。 */
   options?: { label: string; value: string }[]
 }
@@ -102,17 +107,39 @@ const values = ref<Record<string, unknown>>({})
 /** 编辑草稿。统一用字符串承载,提交时按类型转换。 */
 const drafts = ref<Record<string, string>>({})
 const loading = ref(false)
-const banner = ref('')
+const banner = ref<ErrorBanner | null>(null)
 const saved = ref('')
+/** 正在保存的那一行的键。一行一个表单,所以按行记,而不是一个全局布尔。 */
+const savingKey = ref('')
+
+/**
+ * 未登记的键按值类型推断控件。
+ *
+ * 此前回落是写死的 'number':一个手工插入的布尔键会得到数字输入框,
+ * 而字符串键会 —— 因为模板的 v-else 兜底是 enum —— 渲染成一个
+ * **没有选项**的空下拉,用户根本无从修改。两处都属于「保存不出来的设置」。
+ */
+function inferType(value: unknown): SettingMeta['type'] {
+  if (typeof value === 'boolean') return 'boolean'
+  if (typeof value === 'number') return 'number'
+  return 'text'
+}
 
 const rows = computed(() =>
   Object.keys(values.value)
     .sort()
-    .map((key) => ({
-      key,
-      raw: values.value[key],
-      meta: META[key] ?? { label: key, description: '', type: 'number' as const },
-    })),
+    .map((key) => {
+      const meta = META[key]
+      return {
+        key,
+        raw: values.value[key],
+        meta: meta ?? {
+          label: key,
+          description: '',
+          type: inferType(values.value[key]),
+        },
+      }
+    }),
 )
 
 onMounted(load)
@@ -126,7 +153,7 @@ async function load(): Promise<void> {
       Object.entries(values.value).map(([k, v]) => [k, String(v)]),
     )
   } catch (err) {
-    banner.value = err instanceof ApiError ? err.message : '查询失败'
+    banner.value = errorBanner(err, '查询失败')
   } finally {
     loading.value = false
   }
@@ -144,24 +171,48 @@ function coerce(key: string, type: SettingMeta['type']): unknown {
     return raw === 'true'
   }
   if (type === 'number') {
-    const n = Number(raw)
-    return Number.isFinite(n) ? n : raw
+    // 进入这里前已被 save 的校验拦过,Number 一定有界
+    return Number(raw)
   }
   return raw
 }
 
+/** 数字字段的错误文案;空串表示可以提交。 */
+function numberError(raw: string): string {
+  if (raw.trim() === '') return '不能为空'
+  if (!Number.isFinite(Number(raw))) return '必须是数字'
+  return ''
+}
+
 async function save(key: string, type: SettingMeta['type']): Promise<void> {
-  banner.value = ''
+  // 防重入:按钮的 loading 挡得住点击,挡不住回车连发 —— 同一条配置会被
+  // PATCH 两次,在审计日志里留下两条一模一样的「修改」。
+  if (savingKey.value === key) return
+  savingKey.value = key
+  banner.value = null
   saved.value = ''
+
+  const label = META[key]?.label ?? key
+  if (type === 'number') {
+    const err = numberError(drafts.value[key] ?? '')
+    if (err) {
+      banner.value = bannerMessage(`${label}${err}`)
+      savingKey.value = ''
+      return
+    }
+  }
+
   try {
     // 请求体是「配置键 → 值」的映射,不是 { key, value }。
     // 发成后者的话,后端会把字面量 "key" 和 "value" 当成两个配置名写进表里 ——
     // 不报错,但表里多出两条垃圾记录。
     await store.api.patch('/api/admin/settings', { [key]: coerce(key, type) })
-    saved.value = `${META[key]?.label ?? key} 已保存`
+    saved.value = `${label} 已保存`
     await load()
   } catch (err) {
-    banner.value = err instanceof ApiError ? err.message : '保存失败'
+    banner.value = errorBanner(err, '保存失败')
+  } finally {
+    savingKey.value = ''
   }
 }
 </script>
@@ -172,7 +223,7 @@ async function save(key: string, type: SettingMeta['type']): Promise<void> {
       这些配置覆盖代码里的默认值,保存后立即生效。修改会被记入审计日志。
     </p>
 
-    <a-alert v-if="banner" type="error" :message="banner" show-icon style="margin-bottom: 16px" />
+    <ErrorAlert :banner="banner" />
     <a-alert v-if="saved" type="success" :message="saved" show-icon style="margin-bottom: 16px" />
 
     <a-spin :spinning="loading">
@@ -188,29 +239,42 @@ async function save(key: string, type: SettingMeta['type']): Promise<void> {
           {{ row.meta.description }}
         </p>
 
-        <a-space>
-          <a-input
-            v-if="row.meta.type === 'number'"
-            v-model:value="drafts[row.key]"
-            type="number"
-            style="width: 200px"
-          />
-          <a-select
-            v-else-if="row.meta.type === 'boolean'"
-            v-model:value="drafts[row.key]"
-            :options="BOOL_OPTIONS"
-            style="width: 200px"
-          />
-          <a-select
-            v-else
-            v-model:value="drafts[row.key]"
-            :options="row.meta.options ?? []"
-            style="width: 200px"
-          />
-          <a-button type="primary" :disabled="!dirty(row.key)" @click="save(row.key, row.meta.type)">
-            保存
-          </a-button>
-        </a-space>
+        <!--
+          一行一个表单:主按钮是 html-type="submit",回车即保存,
+          与其余页面的写法一致(见 docs/07-frontend.md「表单提交」)。
+          没改动时保存按钮是禁用的 —— 浏览器对唯一的禁用提交按钮不触发
+          隐式提交,所以空回车不会打出一条「不能为空」的横幅。
+        -->
+        <a-form @submit.prevent="save(row.key, row.meta.type)">
+          <a-space>
+            <a-input
+              v-if="row.meta.type === 'number'"
+              v-model:value="drafts[row.key]"
+              type="number"
+              style="width: 200px"
+            />
+            <a-select
+              v-else-if="row.meta.type === 'boolean'"
+              v-model:value="drafts[row.key]"
+              :options="BOOL_OPTIONS"
+              style="width: 200px"
+            />
+            <a-select
+              v-else-if="row.meta.type === 'enum'"
+              v-model:value="drafts[row.key]"
+              :options="row.meta.options ?? []"
+              style="width: 200px"
+            />
+            <!--
+              兜底必须是可输入的文本框。落到空的 a-select 上时,
+              用户面对一个没有任何选项、也点不开的下拉 —— 这项设置就等于改不了。
+            -->
+            <a-input v-else v-model:value="drafts[row.key]" style="width: 200px" />
+            <a-button type="primary" html-type="submit" :loading="savingKey === row.key" :disabled="!dirty(row.key)">
+              保存
+            </a-button>
+          </a-space>
+        </a-form>
 
         <p class="muted" style="margin-top: 8px">配置键:{{ row.key }}</p>
       </a-card>

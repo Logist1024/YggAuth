@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { errorBanner, validateEmail, type ErrorBanner } from '@yggauth/shared'
 
 import { useAdminStore } from '../stores/admin'
+import ErrorAlert from '../components/ErrorAlert.vue'
 
 const store = useAdminStore()
 const route = useRoute()
@@ -14,21 +15,9 @@ const form = reactive({ email: '', password: '' })
 const banner = ref<ErrorBanner | null>(null)
 const submitting = ref(false)
 
-/**
- * 详情行:先给可操作的建议,再给错误码。
- *
- * 没有内容时返回 undefined,让 a-alert 干脆不渲染详情区 ——
- * 传空串会留下一个空白的描述块,看起来像样式坏了。
- */
-const bannerDetail = computed(() => {
-  if (!banner.value) {
-    return undefined
-  }
-  const lines = [banner.value.hint, banner.value.trace].filter(Boolean)
-  return lines.length > 0 ? lines.join('\n') : undefined
-})
-
 async function onSubmit(): Promise<void> {
+  // 防重入:按钮的 loading 挡得住点击,挡不住回车连发 —— 登录多打一次还会给限流计数加一笔。
+  if (submitting.value) return
   // 本地校验失败也走同一套展示结构,否则页面上会出现两种长相不同的错误。
   const local = validateEmail(form.email).message || (form.password ? '' : '请输入密码')
   if (local) {
@@ -38,6 +27,9 @@ async function onSubmit(): Promise<void> {
 
   submitting.value = true
   banner.value = null
+  // 一开写就作废旧提示:已经在重新登录了,再挂一句「登录状态已过期」
+  // 只会干扰对下一次结果的判断。
+  store.clearNotice()
   try {
     await store.api.post('/api/auth/login', { email: form.email, password: form.password })
     await store.load()
@@ -60,15 +52,21 @@ async function onSubmit(): Promise<void> {
       <p class="auth-subtitle">管理后台</p>
 
       <a-form layout="vertical" @submit.prevent="onSubmit">
+        <!--
+          跨页提示:会话过期时后台会把人送回这一页。
+          用 info 而不是 error —— 登录本身还没失败,这只是在解释
+          「你为什么又站回了登录页」。
+        -->
         <a-alert
-          v-if="banner"
-          class="error-alert"
-          type="error"
+          v-if="store.notice"
+          type="info"
           show-icon
+          closable
           style="margin-bottom: 16px"
-          :message="banner.title"
-          :description="bannerDetail"
+          :message="store.notice"
+          @close="store.clearNotice()"
         />
+        <ErrorAlert :banner="banner" />
         <a-form-item label="邮箱">
           <a-input v-model:value="form.email" type="email" autocomplete="username" />
         </a-form-item>
